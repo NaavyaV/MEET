@@ -49,10 +49,10 @@ export function getWebDiscoveryConfig(env: Partial<NodeJS.ProcessEnv> = process.
   const split = (value: string | undefined) => (value ?? "").split(",").map((item) => item.trim().toLowerCase()).filter(Boolean);
   return {
     enabled: env.WEB_DISCOVERY_ENABLED === "true",
-    maxQueries: numberSetting(env.WEB_DISCOVERY_MAX_QUERIES, 6, 6),
-    maxResults: numberSetting(env.WEB_DISCOVERY_MAX_RESULTS, 30, 30),
-    maxFetches: numberSetting(env.WEB_DISCOVERY_MAX_FETCHES, 15, 15),
-    maxPagesPerDomain: numberSetting(env.WEB_DISCOVERY_MAX_PAGES_PER_DOMAIN, 2, 2),
+    maxQueries: numberSetting(env.WEB_DISCOVERY_MAX_QUERIES, 3, 6),
+    maxResults: numberSetting(env.WEB_DISCOVERY_MAX_RESULTS, 18, 30),
+    maxFetches: numberSetting(env.WEB_DISCOVERY_MAX_FETCHES, 6, 15),
+    maxPagesPerDomain: numberSetting(env.WEB_DISCOVERY_MAX_PAGES_PER_DOMAIN, 1, 2),
     allowedRegions: split(env.WEB_DISCOVERY_ALLOWED_REGIONS),
     blockedDomains: [...new Set([...DEFAULT_BLOCKED_DOMAINS, ...split(env.WEB_DISCOVERY_BLOCKED_DOMAINS)])],
     userAgent: env.WEB_DISCOVERY_USER_AGENT || "MEETOpportunityBot/1.0 (+https://meet.example.com/bot)",
@@ -154,7 +154,7 @@ async function robotsDecision(url: string, userAgent: string, cache: Map<string,
   const origin = new URL(url).origin;
   const cached = cache.get(origin); if (cached) return cached;
   try {
-    const response = await fetch(`${origin}/robots.txt`, { headers: { "User-Agent": userAgent }, cache: "no-store", signal: AbortSignal.timeout(5000) });
+    const response = await fetch(`${origin}/robots.txt`, { headers: { "User-Agent": userAgent }, cache: "no-store", signal: AbortSignal.timeout(3000) });
     if (response.status === 404) { const decision = { decision: "allowed" as const, reason: "No robots.txt found; default allow." }; cache.set(origin, decision); return decision; }
     if (!response.ok) { const decision = { decision: "unavailable" as const, reason: `robots.txt returned ${response.status}; skipped conservatively.` }; cache.set(origin, decision); return decision; }
     const allowed = robotsAllows(await response.text(), url, userAgent);
@@ -171,10 +171,10 @@ class DomainRateLimiter {
 
 async function fetchPage(url: string, userAgent: string, limiter: DomainRateLimiter) {
   const domain = domainOf(url); let lastError = "Page fetch failed.";
-  for (let attempt = 0; attempt < 3; attempt += 1) {
+  for (let attempt = 0; attempt < 1; attempt += 1) {
     try {
       await limiter.wait(domain);
-      const response = await fetch(url, { headers: { "User-Agent": userAgent, Accept: "text/html,application/xhtml+xml,text/calendar,application/xml;q=0.9,*/*;q=0.2" }, redirect: "manual", cache: "no-store", signal: AbortSignal.timeout(8000) });
+      const response = await fetch(url, { headers: { "User-Agent": userAgent, Accept: "text/html,application/xhtml+xml,text/calendar,application/xml;q=0.9,*/*;q=0.2" }, redirect: "manual", cache: "no-store", signal: AbortSignal.timeout(5000) });
       if (response.status >= 300 && response.status < 400) throw new Error("Redirected candidate skipped so its destination can be separately screened for robots and policy compliance.");
       if (response.ok) {
         const text = (await response.text()).slice(0, 900_000);
@@ -185,7 +185,7 @@ async function fetchPage(url: string, userAgent: string, limiter: DomainRateLimi
       }
       lastError = `Page returned ${response.status}.`; if (response.status < 500) break;
     } catch (error) { lastError = error instanceof Error ? error.message : "Page fetch failed."; }
-    await delay(200 * (attempt + 1));
+    await delay(100);
   }
   throw new Error(lastError);
 }
@@ -341,6 +341,7 @@ export function toProvenanceRecord(event: Opportunity) {
 export type WebDiscoveryResult = { events: Opportunity[]; ledger: LedgerEntry[]; diagnostics: DiscoveryDiagnostics };
 
 export async function runWebDiscovery(profile: UserProfile, provider: WebSearchProvider = new ExaSearchProvider(process.env.EXA_API_KEY || ""), config = getWebDiscoveryConfig()): Promise<WebDiscoveryResult> {
+  config = { ...config, maxQueries: Math.min(config.maxQueries, 4), maxResults: Math.min(config.maxResults, 20), maxFetches: Math.min(config.maxFetches, 8), maxPagesPerDomain: 1 };
   const diagnostics: DiscoveryDiagnostics = { enabled: config.enabled, queries: [], candidates: [], fetched: 0, structuredExtractions: 0, llmExtractions: 0, rejectedEvents: [] };
   const ledger: LedgerEntry[] = [];
   if (!config.enabled) return { events: [], diagnostics, ledger: [{ id: "web-disabled", kind: "source", status: "skipped", title: "Web discovery", detail: "Disabled by WEB_DISCOVERY_ENABLED.", at: "just now" }] };
@@ -368,9 +369,9 @@ export async function runWebDiscovery(profile: UserProfile, provider: WebSearchP
   ledger.push({ id: "web-candidates", kind: "source", status: "complete", title: "Web candidates screened", detail: `${rawResults.length} results found; ${selected.length} eligible pages selected. ${skipped.length} skipped by URL, domain, duplicate, or budget rules.`, at: "just now" });
   for (const [index, candidate] of skipped.entries()) ledger.push({ id: `web-skip-${index}-${stableId(candidate.normalizedUrl)}`, kind: "source", status: "skipped", title: candidate.domain, detail: candidate.reason ?? "Candidate skipped.", at: "just now" });
   const robotsCache = new Map<string, RobotsDecision>(); const limiter = new DomainRateLimiter(); const events: Opportunity[] = [];
-  for (const candidate of selected) {
+  await Promise.allSettled(selected.map(async (candidate) => {
     const robot = await robotsDecision(candidate.normalizedUrl, config.userAgent, robotsCache);
-    if (robot.decision !== "allowed") { candidate.decision = "robots-disallowed"; candidate.reason = robot.reason; ledger.push({ id: `web-robots-${stableId(candidate.normalizedUrl)}`, kind: "source", status: "skipped", title: `robots.txt · ${candidate.domain}`, detail: robot.reason, at: "just now" }); continue; }
+    if (robot.decision !== "allowed") { candidate.decision = "robots-disallowed"; candidate.reason = robot.reason; ledger.push({ id: `web-robots-${stableId(candidate.normalizedUrl)}`, kind: "source", status: "skipped", title: `robots.txt · ${candidate.domain}`, detail: robot.reason, at: "just now" }); return; }
     try {
       const page = await fetchPage(candidate.normalizedUrl, config.userAgent, limiter); diagnostics.fetched += 1; candidate.normalizedUrl = page.url; candidate.decision = "fetched"; candidate.reason = "Fetched after URL, budget, and robots checks.";
       const jsonLd = extractStructuredEvents(page.text, page.url, profile, config.allowedRegions);
@@ -396,7 +397,7 @@ export async function runWebDiscovery(profile: UserProfile, provider: WebSearchP
       }
       diagnostics.rejectedEvents.push(...structured.rejected);
     } catch (error) { candidate.decision = "error"; candidate.reason = error instanceof Error ? error.message : "Fetch failed."; ledger.push({ id: `web-fetch-error-${stableId(candidate.normalizedUrl)}`, kind: "source", status: "attention", title: `Fetch failed · ${candidate.domain}`, detail: candidate.reason, at: "just now" }); }
-  }
+  }));
   for (const [index, reason] of diagnostics.rejectedEvents.entries()) ledger.push({ id: `web-rejected-${index}-${stableId(reason)}`, kind: "source", status: "skipped", title: "Extracted event rejected", detail: reason, at: "just now" });
   ledger.unshift({ id: "web-discovery", kind: "source", status: "complete", title: "Web discovery", detail: `${diagnostics.fetched} public pages fetched within ${config.maxFetches}-page / ${config.maxPagesPerDomain}-per-domain budgets; ${events.length} evidence-backed events passed validation.`, at: "just now" });
   return { events, ledger, diagnostics };

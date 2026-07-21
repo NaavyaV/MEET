@@ -8,8 +8,14 @@ import { LedgerEntry, RefreshResult, UserProfile } from "./types";
 export async function runRefreshPipeline(profile: UserProfile = defaultProfile, userId?: string): Promise<RefreshResult> {
   const ingestion = await ingestOpportunities(profile);
   if (!ingestion.events.length) {
-    const ledger: LedgerEntry[] = [...ingestion.ledger, { id: "demo", kind: "system", status: "attention", title: "Showing the sample feed", detail: "No live sources returned events. Demo opportunities are clearly separated from your configured sources.", at: "just now" }];
+    const hasConfiguredLiveSource = ingestion.sources.some((source) => source.status !== "skipped");
+    const ledger: LedgerEntry[] = [...ingestion.ledger];
     if (userId) { const saved = await persistRefresh(userId, profile, [], ledger, ingestion.sources, ingestion.discovery); if (!saved.persisted) ledger.push({ id: "persist-warning", kind: "system", status: "attention", title: "Database sync needs attention", detail: saved.error ?? "Refresh completed but could not be persisted.", at: "just now" }); }
+    if (hasConfiguredLiveSource) {
+      ledger.push({ id: "empty-live", kind: "system", status: "attention", title: "No live opportunities found", detail: "Configured sources completed without a usable event. No sample cards were mixed into this refresh.", at: "just now" });
+      return { mode: "empty", events: [], sources: ingestion.sources, ledger };
+    }
+    ledger.push({ id: "demo", kind: "system", status: "attention", title: "Showing the sample feed", detail: "No live source is configured. Demo opportunities are clearly separated from future live sources.", at: "just now" });
     return { mode: "demo", events: makeDemoEvents(profile).map((event) => ({ ...event, relevanceMethod: "fallback" as const })), sources: ingestion.sources, ledger };
   }
   let relevanceScores: Record<string, number> = {}; let relevanceReasons: Record<string, string> = {}; const ledger: LedgerEntry[] = [...ingestion.ledger];

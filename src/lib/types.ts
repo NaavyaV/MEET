@@ -89,7 +89,7 @@ export type LedgerEntry = {
 export type RefreshResult = {
   events: Opportunity[];
   ledger: LedgerEntry[];
-  mode: "live" | "demo";
+  mode: "live" | "demo" | "empty";
   sources: { name: string; count: number; status: "complete" | "skipped" | "attention" }[];
 };
 

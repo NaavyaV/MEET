@@ -28,7 +28,7 @@ async function jsonCompletion<T>(system: string, prompt: string): Promise<T | nu
       { role: "system", content: `${system}\nReturn only valid JSON. Do not invent facts.` },
       { role: "user", content: prompt },
     ],
-  });
+  }, { signal: AbortSignal.timeout(8000) });
   return parseJson<T>(response.choices[0]?.message.content);
 }
 

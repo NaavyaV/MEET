@@ -7,7 +7,7 @@ export const defaultProfile: UserProfile = {
   interests: ["AI", "developer tools", "education", "community"],
   careerStage: "Student / early career",
   goals: "Build an AI education product, meet thoughtful collaborators, and find technical opportunities.",
-  location: "Chicago, IL",
+  location: "Chicago, Illinois",
   latitude: 41.8781,
   longitude: -87.6298,
   travelRadius: 12,
