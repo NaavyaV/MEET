@@ -56,6 +56,14 @@ describe("web discovery decisions", () => {
     expect(valid.event?.sourceType).toBe("web-discovery");
   });
 
+  it("rejects evidence-backed events more than 62 days away", () => {
+    const now = new Date("2026-07-21T12:00:00Z");
+    const tooFar = new Date(now.getTime() + 63 * 86_400_000).toISOString();
+    const result = validateExtractedEvent({ title: "Later workshop", startsAt: tooFar, sourceUrl: "https://example.edu/events/later", evidence: ["Later workshop on the event page"] }, "https://example.edu/events/later", defaultProfile, now);
+    expect(result.event).toBeNull();
+    expect(result.reason).toContain("more than 62 days away");
+  });
+
   it("projects source provenance without raw page text", () => {
     const record = toProvenanceRecord(webEvent());
     expect(record).toMatchObject({ source_domain: "example.edu", extraction_method: "structured", discovery_query: "AI events Chicago" });

@@ -1,10 +1,13 @@
 import { deduplicate } from "./engine";
+import { isWithinUpcomingEventWindow } from "./event-window";
 import { extractEventsWithGroq, groqConfigured } from "./groq";
-import { validateExtractedEvent, getWebDiscoveryConfig, runWebDiscovery, WebDiscoveryResult } from "./web-discovery";
+import { haversineMiles, validateExtractedEvent, getWebDiscoveryConfig, runWebDiscovery, WebDiscoveryResult } from "./web-discovery";
 import { LedgerEntry, Opportunity, UserProfile } from "./types";
 
 type SourceStatus = { name: string; count: number; status: "complete" | "skipped" | "attention" };
 type SourceLoadResult = { events: Opportunity[]; ledger?: LedgerEntry[]; discovery?: WebDiscoveryResult["diagnostics"] };
+const MAX_EVENTS_PER_FEED = 50;
+const MAX_STRUCTURED_EVENTS_PER_REFRESH = 90;
 
 function stripHtml(value: string) {
   return value.replace(/<script[^>]*>[\s\S]*?<\/script>/gi, " ").replace(/<style[^>]*>[\s\S]*?<\/style>/gi, " ").replace(/<[^>]+>/g, " ").replace(/&amp;/g, "&").replace(/&quot;/g, '"').replace(/\s+/g, " ").trim();
@@ -12,41 +15,41 @@ function stripHtml(value: string) {
 function textIn(xml: string, tag: string) { const match = xml.match(new RegExp(`<${tag}[^>]*>([\\s\\S]*?)<\\/${tag}>`, "i")); return match ? stripHtml(match[1].replace(/<!\[CDATA\[([\s\S]*?)]]>/g, "$1")) : ""; }
 function slug(value: string) { return value.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/(^-|-$)/g, "").slice(0, 72); }
 function inferFormat(value: string): Opportunity["format"] { return /hybrid/i.test(value) ? "hybrid" : /online|virtual|zoom|remote/i.test(value) ? "online" : "in-person"; }
-function distanceMiles(latitude: number, longitude: number, eventLatitude: number | null, eventLongitude: number | null) {
-  if (eventLatitude == null || eventLongitude == null || !Number.isFinite(latitude) || !Number.isFinite(longitude)) return null;
-  const radians = (degrees: number) => degrees * Math.PI / 180;
-  const lat = radians(eventLatitude - latitude); const lon = radians(eventLongitude - longitude);
-  const value = Math.sin(lat / 2) ** 2 + Math.cos(radians(latitude)) * Math.cos(radians(eventLatitude)) * Math.sin(lon / 2) ** 2;
-  return 3958.8 * 2 * Math.atan2(Math.sqrt(value), Math.sqrt(1 - value));
+function parseIcsDate(value: string) { const match = value.match(/^(\d{4})(\d{2})(\d{2})(?:T(\d{2})(\d{2})(\d{2})?(Z)?)?$/); if (!match) return null; const [, year, month, day, hour = "00", minute = "00", second = "00", utc] = match; const iso = `${year}-${month}-${day}T${hour}:${minute}:${second}${utc ? "Z" : ""}`; const date = new Date(iso); return Number.isNaN(date.getTime()) ? null : date; }
+function icsField(block: string, field: string) { return block.match(new RegExp(`^${field}(?:;[^:]*)?:(.+)$`, "im"))?.[1].replace(/\\n/g, " ").trim() ?? ""; }
+function finiteCoordinate(value: string) { const coordinate = Number(value); return Number.isFinite(coordinate) ? coordinate : null; }
+function locationDistance(profile: UserProfile | undefined, latitude: number | null, longitude: number | null) { return profile && latitude != null && longitude != null ? haversineMiles(profile.latitude, profile.longitude, latitude, longitude) : null; }
+
+export function parseIcs(ics: string, sourceUrl: string, now = new Date(), profile?: UserProfile): Opportunity[] {
+  const sourceDomain = new URL(sourceUrl).hostname; const blocks = ics.match(/BEGIN:VEVENT[\s\S]*?END:VEVENT/gi) ?? [];
+  return blocks.flatMap((block, index): Opportunity[] => {
+    const title = icsField(block, "SUMMARY"); const start = parseIcsDate(icsField(block, "DTSTART")); const end = parseIcsDate(icsField(block, "DTEND")); const location = icsField(block, "LOCATION"); const description = icsField(block, "DESCRIPTION"); const url = icsField(block, "URL") || sourceUrl;
+    const [latitudeText, longitudeText] = icsField(block, "GEO").split(/[;,]/); const latitude = finiteCoordinate(latitudeText); const longitude = finiteCoordinate(longitudeText); const format = inferFormat(`${location} ${description}`); const distanceMiles = locationDistance(profile, latitude, longitude);
+    if (!title || !start || !isWithinUpcomingEventWindow(start, now)) return [];
+    if (format === "in-person" && distanceMiles != null && profile && distanceMiles > profile.travelRadius) return [];
+    return [{ id: `ics-${slug(title)}-${start.getTime()}-${index}`, title, source: sourceDomain, sourceType: "rss", url, description, startsAt: start.toISOString(), endsAt: end?.toISOString(), format, venue: location || undefined, latitude, longitude, distanceMiles, category: "Calendar event", tags: [], provenance: { sourceDomain, sourceUrl, extractionMethod: "rss", extractionConfidence: 1, evidence: [`ICS VEVENT: ${title}; DTSTART ${icsField(block, "DTSTART")}`] } }];
+  });
 }
 
-function parseRss(xml: string, sourceUrl: string): Opportunity[] {
+export function parseRss(xml: string, sourceUrl: string, now = new Date(), profile?: UserProfile): Opportunity[] {
   const entries = xml.match(/<(?:item|entry)\b[\s\S]*?<\/(?:item|entry)>/gi) ?? [];
   return entries.flatMap((entry, index): Opportunity[] => {
     const title = textIn(entry, "title"); const description = textIn(entry, "description") || textIn(entry, "content") || textIn(entry, "summary");
-    const startsAt = textIn(entry, "pubDate") || textIn(entry, "updated") || textIn(entry, "published"); const link = entry.match(/<link[^>]+href=["']([^"']+)["']/i)?.[1] || textIn(entry, "link") || sourceUrl;
-    if (!title || Number.isNaN(Date.parse(startsAt)) || new Date(startsAt).getTime() <= Date.now()) return [];
-    return [{ id: `rss-${slug(title)}-${index}`, title, source: "Community RSS feed", sourceType: "rss", url: link, description: description || "", startsAt: new Date(startsAt).toISOString(), format: inferFormat(`${title} ${description}`), category: "Community event", tags: [], provenance: { sourceDomain: new URL(sourceUrl).hostname, sourceUrl, extractionMethod: "rss", extractionConfidence: 1, evidence: [`RSS/Atom item: ${title}; published ${startsAt}`] } }];
+    const startsAt = textIn(entry, "event:start_time") || textIn(entry, "event:start") || textIn(entry, "startDate") || textIn(entry, "dtstart") || textIn(entry, "pubDate") || textIn(entry, "updated") || textIn(entry, "published"); const link = entry.match(/<link[^>]+href=["']([^"']+)["']/i)?.[1] || textIn(entry, "link") || sourceUrl;
+    const start = new Date(startsAt);
+    const latitude = finiteCoordinate(textIn(entry, "geo:lat") || textIn(entry, "latitude")); const longitude = finiteCoordinate(textIn(entry, "geo:long") || textIn(entry, "longitude")); const format = inferFormat(`${title} ${description}`); const distanceMiles = locationDistance(profile, latitude, longitude);
+    if (!title || !isWithinUpcomingEventWindow(start, now)) return [];
+    if (format === "in-person" && distanceMiles != null && profile && distanceMiles > profile.travelRadius) return [];
+    return [{ id: `rss-${slug(title)}-${index}`, title, source: "Community RSS feed", sourceType: "rss", url: link, description: description || "", startsAt: start.toISOString(), format, latitude, longitude, distanceMiles, category: "Community event", tags: [], provenance: { sourceDomain: new URL(sourceUrl).hostname, sourceUrl, extractionMethod: "rss", extractionConfidence: 1, evidence: [`RSS/Atom item: ${title}; event date ${startsAt}`] } }];
   });
 }
 
-async function eventbriteSource(profile: UserProfile): Promise<SourceLoadResult> {
-  const token = process.env.EVENTBRITE_API_KEY || process.env.EVENTBRITE_PRIVATE_TOKEN; if (!token) return { events: [] };
-  const url = new URL("https://www.eventbriteapi.com/v3/events/search/"); url.searchParams.set("location.address", profile.location); url.searchParams.set("location.within", `${profile.travelRadius}mi`); url.searchParams.set("expand", "venue,organizer");
-  const response = await fetch(url, { headers: { Authorization: `Bearer ${token}` }, next: { revalidate: 0 } }); if (!response.ok) throw new Error(`Eventbrite returned ${response.status}`);
-  const data = await response.json() as { events?: Array<Record<string, unknown>> };
-  const events = (data.events ?? []).flatMap((item, index): Opportunity[] => {
-    const name = item.name as { text?: string } | undefined; const description = item.description as { text?: string } | undefined; const start = item.start as { utc?: string } | undefined;
-    const venue = item.venue as { name?: string; address?: { localized_address_display?: string; latitude?: string; longitude?: string } } | undefined; const organizer = item.organizer as { name?: string } | undefined;
-    if (!name?.text || !start?.utc || Number.isNaN(Date.parse(start.utc)) || new Date(start.utc).getTime() <= Date.now()) return [];
-    const eventUrl = typeof item.url === "string" ? item.url : "https://www.eventbrite.com/";
-    const latitude = Number(venue?.address?.latitude) || null; const longitude = Number(venue?.address?.longitude) || null;
-    return [{ id: `eventbrite-${String(item.id ?? index)}`, externalId: String(item.id ?? index), title: name.text, source: organizer?.name ?? "Eventbrite", sourceType: "api", url: eventUrl, description: description?.text ?? "", startsAt: new Date(start.utc).toISOString(), format: inferFormat(`${name.text} ${description?.text ?? ""}`), venue: venue?.name, address: venue?.address?.localized_address_display, latitude, longitude, distanceMiles: distanceMiles(profile.latitude, profile.longitude, latitude, longitude), category: "Event", tags: [], provenance: { sourceDomain: "eventbrite.com", sourceUrl: eventUrl, extractionMethod: "api", extractionConfidence: 1, evidence: [`Eventbrite API event: ${name.text}; starts ${start.utc}; searched near ${profile.location}`] } }];
-  });
-  return { events };
+async function rssSource(profile: UserProfile): Promise<SourceLoadResult> {
+  const urls = (process.env.MEET_RSS_FEED_URL ?? "").split(",").map((url) => url.trim()).filter(Boolean).slice(0, 6); if (!urls.length) return { events: [] };
+  const results = await Promise.allSettled(urls.map(async (sourceUrl) => { const response = await fetch(sourceUrl, { next: { revalidate: 0 }, signal: AbortSignal.timeout(7000) }); if (!response.ok) throw new Error(`${sourceUrl} returned ${response.status}`); const body = await response.text(); const parsed = /BEGIN:VEVENT/i.test(body) || /text\/calendar/i.test(response.headers.get("content-type") ?? "") || /\.ics(?:$|\?)/i.test(sourceUrl) ? parseIcs(body, sourceUrl, new Date(), profile) : parseRss(body, sourceUrl, new Date(), profile); return parsed.sort((left, right) => left.startsAt.localeCompare(right.startsAt)).slice(0, MAX_EVENTS_PER_FEED); }));
+  const failed = results.find((result) => result.status === "rejected"); if (failed && results.every((result) => result.status === "rejected")) throw failed.reason;
+  return { events: results.flatMap((result) => result.status === "fulfilled" ? result.value : []).sort((left, right) => left.startsAt.localeCompare(right.startsAt)).slice(0, MAX_STRUCTURED_EVENTS_PER_REFRESH) };
 }
-
-async function rssSource(): Promise<SourceLoadResult> { const feedUrl = process.env.MEET_RSS_FEED_URL; if (!feedUrl) return { events: [] }; const response = await fetch(feedUrl, { next: { revalidate: 0 } }); if (!response.ok) throw new Error(`RSS feed returned ${response.status}`); return { events: parseRss(await response.text(), feedUrl) }; }
 
 async function crawlerSource(profile: UserProfile): Promise<SourceLoadResult> {
   const urls = (process.env.CRAWL_SEED_URLS ?? "").split(",").map((url) => url.trim()).filter(Boolean).slice(0, 3); if (!urls.length) return { events: [] }; if (!groqConfigured()) throw new Error("Curated crawler needs GROQ_API_KEY for permitted-page extraction");
@@ -58,8 +61,8 @@ async function crawlerSource(profile: UserProfile): Promise<SourceLoadResult> {
 export async function ingestOpportunities(profile: UserProfile) {
   const webConfig = getWebDiscoveryConfig();
   const jobs: { name: string; configured: boolean; missingDetail: string; load: () => Promise<SourceLoadResult> }[] = [
-    { name: "Eventbrite API", configured: Boolean(process.env.EVENTBRITE_API_KEY || process.env.EVENTBRITE_PRIVATE_TOKEN), missingDetail: "Not configured — add EVENTBRITE_API_KEY.", load: () => eventbriteSource(profile) },
-    { name: "Community RSS feed", configured: Boolean(process.env.MEET_RSS_FEED_URL), missingDetail: "Not configured — add MEET_RSS_FEED_URL.", load: rssSource },
+    { name: "Eventbrite API", configured: false, missingDetail: "Direct Eventbrite location search is retired by Eventbrite; public Eventbrite listings can still be discovered through web search.", load: async () => ({ events: [] }) },
+    { name: "Community RSS feed", configured: Boolean(process.env.MEET_RSS_FEED_URL), missingDetail: "Not configured — add MEET_RSS_FEED_URL.", load: () => rssSource(profile) },
     { name: "Permitted seed crawler", configured: Boolean(process.env.CRAWL_SEED_URLS), missingDetail: "Not configured — add up to three CRAWL_SEED_URLS.", load: () => crawlerSource(profile) },
     { name: "Web discovery", configured: webConfig.enabled, missingDetail: "Disabled — set WEB_DISCOVERY_ENABLED=true and provide EXA_API_KEY.", load: async () => { const result = await runWebDiscovery(profile, undefined, webConfig); return { events: result.events, ledger: result.ledger, discovery: result.diagnostics }; } },
   ];

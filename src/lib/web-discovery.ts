@@ -1,9 +1,11 @@
 import { extractEventsWithGroq, groqConfigured, refineDiscoveryQueriesWithGroq } from "./groq";
+import { isWithinUpcomingEventWindow, UPCOMING_EVENT_WINDOW_DAYS } from "./event-window";
 import { DiscoveryCandidate, DiscoveryDiagnostics, EventFormat, EventProvenance, LedgerEntry, Opportunity, UserProfile } from "./types";
 
 const DEFAULT_BLOCKED_DOMAINS = [
   "linkedin.com", "facebook.com", "instagram.com", "x.com", "twitter.com", "tiktok.com", "reddit.com", "discord.com",
   "accounts.google.com", "google.com", "bing.com", "yahoo.com",
+  "eventbrite.com", "allevents.in", "happeningnext.com", "stayhappening.com", "devpost.com",
 ];
 const IRRELEVANT_TERMS = /\b(wedding|nightclub|concert tickets|sports betting|restaurant reservation|real estate open house)\b/i;
 const PRIVATE_PATH = /\/(?:checkout|cart|account|login|sign-?in|profile|people|search)(?:\/|$)/i;
@@ -93,17 +95,19 @@ export function buildDiscoveryQueries(profile: UserProfile, config: Pick<WebDisc
   const month = new Intl.DateTimeFormat("en-US", { month: "long", year: "numeric" }).format(now);
   const followingMonth = new Intl.DateTimeFormat("en-US", { month: "long", year: "numeric" }).format(new Date(now.getFullYear(), now.getMonth() + 1, 1));
   const dateWindow = `${month} or ${followingMonth}`;
-  const location = profile.formatPreference === "online" ? "online" : profile.location;
+  const city = profile.location.split(",")[0]?.trim() || profile.location;
+  const metro = /^(mckinney|plano|frisco|allen|dallas|fort worth|arlington|richardson)$/i.test(city) ? "Dallas Fort Worth" : city;
+  const location = profile.formatPreference === "online" ? "online" : `${city} ${metro}`.trim();
   const topic = [...profile.interests, ...profile.skills].filter(Boolean).slice(0, 3).join(" ") || "technology";
   const goalWords = profile.goals.split(/[^a-zA-Z0-9]+/).filter((word) => word.length > 4).slice(0, 3).join(" ");
   const formatHint = profile.formatPreference === "online" ? "online virtual" : profile.formatPreference === "in-person" ? "in person" : "upcoming";
   const queries = [
-    `${topic} developer events ${location} ${dateWindow}`,
-    `${profile.interests[0] || "technology"} workshop ${location} upcoming ${dateWindow}`,
-    `hackathon ${location} ${profile.careerStage} upcoming ${dateWindow}`,
-    `site:*.edu computer science events ${profile.location} ${dateWindow}`,
-    `professional networking events ${location} ${topic} ${dateWindow}`,
-    `${goalWords || "career growth"} ${formatHint} demo day conference ${location} ${dateWindow}`,
+    `${topic} developer events ${location} ${dateWindow} official`,
+    `${profile.interests[0] || "technology"} workshop ${location} upcoming ${dateWindow} official`,
+    `hackathon ${location} ${profile.careerStage} upcoming ${dateWindow} official`,
+    `site:*.edu computer science engineering events ${metro} ${dateWindow}`,
+    `startup technology networking events ${location} ${dateWindow} official`,
+    `${goalWords || "career growth"} ${formatHint} demo day conference ${location} ${dateWindow} official`,
   ];
   return [...new Set(queries.map((query) => query.replace(/\s+/g, " ").trim()))].slice(0, config.maxQueries);
 }
@@ -238,8 +242,9 @@ export function validateExtractedEvent(input: ExtractedCandidate, sourceUrl: str
   const endsAt = input.endsAt ?? undefined;
   if (!input.title?.trim()) return { event: null, reason: "Rejected extraction: title is missing." };
   if (!validDate(startsAt) || new Date(startsAt as string).getTime() <= now.getTime()) return { event: null, reason: "Rejected extraction: date is missing, invalid, or not future." };
+  if (!isWithinUpcomingEventWindow(startsAt as string, now)) return { event: null, reason: `Rejected extraction: date is more than ${UPCOMING_EVENT_WINDOW_DAYS} days away.` };
   if (!normalizedSource) return { event: null, reason: "Rejected extraction: source URL is invalid." };
-  const evidence = (input.evidence ?? []).map((item) => item.trim()).filter(Boolean).slice(0, 3);
+  const evidence = (Array.isArray(input.evidence) ? input.evidence : typeof input.evidence === "string" ? [input.evidence] : []).filter((item): item is string => typeof item === "string").map((item) => item.trim()).filter(Boolean).slice(0, 3);
   if (!evidence.length) return { event: null, reason: "Rejected extraction: no page evidence supports the event." };
   const sourceDomain = domainOf(normalizedSource);
   const latitude = typeof input.latitude === "number" && Number.isFinite(input.latitude) ? input.latitude : undefined;

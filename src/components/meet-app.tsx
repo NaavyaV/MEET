@@ -1,23 +1,17 @@
 "use client";
 
-import { ChangeEvent, ReactNode, useEffect, useMemo, useState } from "react";
+import { ChangeEvent, ReactNode, useCallback, useEffect, useMemo, useState } from "react";
 import dynamic from "next/dynamic";
-import { defaultProfile, initialLedger, makeDemoEvents } from "@/src/lib/demo-data";
-import { createSupabaseBrowserClient } from "@/src/lib/supabase";
+import { LocationAutocomplete, LocationChoice } from "./location-autocomplete";
+import { defaultProfile, initialLedger } from "@/src/lib/demo-data";
+import { createSupabaseBrowserClient, supabaseBrowserConfigured } from "@/src/lib/supabase";
 import { EventAction, LedgerEntry, Opportunity, RefreshResult, UserProfile } from "@/src/lib/types";
 
 type Tab = "discover" | "ledger" | "network" | "settings" | "about";
 type Stage = "landing" | "onboarding" | "app";
+type AccountProfilePayload = { profile: UserProfile; onboardingCompleted: boolean; digestFrequency?: "daily" | "weekly" | "on-demand"; error?: string };
 
 const LocationRadiusMap = dynamic(() => import("./location-map"), { ssr: false, loading: () => <div className="location-map map-loading">Loading your map…</div> });
-const LOCATION_OPTIONS = [
-  { label: "Chicago, Illinois", latitude: 41.8781, longitude: -87.6298 },
-  { label: "New York, New York", latitude: 40.7128, longitude: -74.006 },
-  { label: "San Francisco, California", latitude: 37.7749, longitude: -122.4194 },
-  { label: "Austin, Texas", latitude: 30.2672, longitude: -97.7431 },
-  { label: "Seattle, Washington", latitude: 47.6062, longitude: -122.3321 },
-  { label: "Boston, Massachusetts", latitude: 42.3601, longitude: -71.0589 },
-] as const;
 
 const icons: Record<string, ReactNode> = {
   spark: <><path d="m12 2 1.7 6.3L20 10l-6.3 1.7L12 18l-1.7-6.3L4 10l6.3-1.7L12 2Z" /><path d="m19 16 .7 2.3L22 19l-2.3.7L19 22l-.7-2.3L16 19l2.3-.7L19 16Z" /></>,
@@ -54,6 +48,20 @@ async function responseJson<T>(response: Response): Promise<T> {
   const text = await response.text();
   if (!text) return {} as T;
   try { return JSON.parse(text) as T; } catch { return { error: "The server returned an incomplete response. Please try again." } as T; }
+}
+
+async function accountProfile(accessToken: string, options?: { profile: UserProfile; digestFrequency?: "daily" | "weekly" | "on-demand"; completeOnboarding?: boolean }): Promise<AccountProfilePayload> {
+  const response = await fetch("/api/account/profile", { method: options ? "PUT" : "GET", headers: { Authorization: `Bearer ${accessToken}`, ...(options ? { "Content-Type": "application/json" } : {}) }, ...(options ? { body: JSON.stringify(options) } : {}) });
+  const payload = await responseJson<AccountProfilePayload>(response);
+  if (!response.ok) throw new Error(payload.error || "Could not save your MEET profile.");
+  return payload;
+}
+
+async function accountActions(accessToken: string): Promise<Record<string, EventAction>> {
+  const response = await fetch("/api/account/preferences", { headers: { Authorization: `Bearer ${accessToken}` } });
+  const payload = await responseJson<{ actions?: Record<string, EventAction>; error?: string }>(response);
+  if (!response.ok) throw new Error(payload.error || "Could not load saved event decisions.");
+  return payload.actions ?? {};
 }
 
 function FriendLine({ names }: { names?: string[] }) {
@@ -139,6 +147,7 @@ function Chips({ values, onChange }: { values: string[]; onChange: (values: stri
 function Onboarding({ profile, onFinish, onBack }: { profile: UserProfile; onFinish: (profile: UserProfile) => void; onBack: () => void }) {
   const [step, setStep] = useState(1);
   const [draft, setDraft] = useState(profile);
+  const [locationQuery, setLocationQuery] = useState(profile.location);
   const [parsing, setParsing] = useState(false);
   const [parseNote, setParseNote] = useState("");
   const [missed, setMissed] = useState("");
@@ -164,32 +173,48 @@ function Onboarding({ profile, onFinish, onBack }: { profile: UserProfile; onFin
     if (!navigator.geolocation) { setParseNote("Your browser does not support location access. Enter a city, ZIP code, or address instead."); return; }
     navigator.geolocation.getCurrentPosition(async (position) => {
       const latitude = position.coords.latitude; const longitude = position.coords.longitude;
-      try { const response = await fetch("/api/location", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ latitude, longitude }) }); const result = await response.json(); setDraft((current) => ({ ...current, latitude, longitude, location: response.ok ? result.label : "Current location" })); setParseNote("Current location is now the center of your discovery area."); } catch { setDraft((current) => ({ ...current, latitude, longitude, location: "Current location" })); setParseNote("Current location is now the center of your discovery area."); }
+      try { const response = await fetch("/api/location", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ latitude, longitude }) }); const result = await responseJson<{ label?: string }>(response); const label = response.ok && result.label ? result.label : "Current location"; setDraft((current) => ({ ...current, latitude, longitude, location: label })); setLocationQuery(label); setParseNote("Current location is now the center of your discovery area."); } catch { setDraft((current) => ({ ...current, latitude, longitude, location: "Current location" })); setLocationQuery("Current location"); setParseNote("Current location is now the center of your discovery area."); }
     }, () => setParseNote("Location access was not granted. Enter a city, ZIP code, or address instead."), { enableHighAccuracy: false, timeout: 8000 });
   }
-  const chooseLocation = (label: string) => { const choice = LOCATION_OPTIONS.find((option) => option.label === label); if (choice) { setDraft((current) => ({ ...current, location: choice.label, latitude: choice.latitude, longitude: choice.longitude })); setParseNote(""); } };
-  const selectedLocation = LOCATION_OPTIONS.some((option) => option.label === draft.location) ? draft.location : "__current__";
+  const chooseLocation = (choice: LocationChoice) => { setDraft((current) => ({ ...current, location: choice.label, latitude: choice.latitude, longitude: choice.longitude })); setLocationQuery(choice.label); setParseNote(""); };
   return <main className="onboarding-shell"><button className="onboarding-brand" onClick={onBack}><span><Icon name="spark" size={18} /></span>MEET</button><section className="onboarding"><div className="onboard-progress"><span className={step >= 1 ? "active" : ""}>1</span><i /><span className={step >= 2 ? "active" : ""}>2</span><i /><span className={step >= 3 ? "active" : ""}>3</span></div>
-    {step === 1 && <><span className="eyebrow">Make your signal visible</span><h1>What are you building toward?</h1><p className="onboard-intro">Bring a resume or your LinkedIn export, or simply tell us what you care about. You stay in control of what MEET remembers.</p><label className="upload-zone"><input type="file" accept=".txt,.md,.pdf,.json,.csv" onChange={readUpload} /><span className="upload-icon"><Icon name="upload" /></span><b>{parsing ? "Reading your file…" : "Upload resume or LinkedIn export"}</b><small>PDF, TXT, JSON, or CSV · parsed once by Groq</small></label>{parseNote && <p className="parse-note">{parseNote}</p>}<div className="form-grid"><label>Your name<input value={draft.name} onChange={(event) => set("name", event.target.value)} /></label><label>Career stage<select value={draft.careerStage} onChange={(event) => set("careerStage", event.target.value)}><option>Student / early career</option><option>Career switcher</option><option>Mid-career builder</option><option>Founder</option></select></label></div><label>Skills <Chips values={draft.skills} onChange={(values) => set("skills", values)} /></label><label>Interests <Chips values={draft.interests} onChange={(values) => set("interests", values)} /></label></>}
-    {step === 2 && <><span className="eyebrow">Location & logistics</span><h1>Where should MEET look?</h1><p className="onboard-intro">Select a home base or use your device location. MEET keeps in-person opportunities within the travel area you choose.</p><label>Home base<select value={selectedLocation} onChange={(event) => event.target.value === "__current__" ? applyCurrentLocation() : chooseLocation(event.target.value)}>{LOCATION_OPTIONS.map((option) => <option value={option.label} key={option.label}>{option.label}</option>)}<option value="__current__">Use my current location</option></select></label><div className="form-grid location-fields"><label>Travel area<select value={draft.travelRadius} onChange={(event) => set("travelRadius", Number(event.target.value))}>{[3, 5, 10, 15, 25, 40, 60].map((miles) => <option value={miles} key={miles}>{miles} miles</option>)}</select></label><label>Event format<select value={draft.formatPreference} onChange={(event) => set("formatPreference", event.target.value as UserProfile["formatPreference"])}><option value="both">In person + online</option><option value="in-person">In person only</option><option value="online">Online only</option></select></label><label>Best times<select value={draft.availability} onChange={(event) => set("availability", event.target.value as UserProfile["availability"])}><option value="evenings">Weekday evenings</option><option value="weekdays">Weekdays</option><option value="weekends">Weekends</option><option value="flexible">Any time</option></select></label></div><LocationRadiusMap latitude={draft.latitude} longitude={draft.longitude} location={draft.location} radius={draft.travelRadius} /></>}
+    {step === 1 && <><span className="eyebrow">Make your signal visible</span><h1>What are you building toward?</h1><p className="onboard-intro">Bring a resume or your LinkedIn export, or simply tell us what you care about. MEET pulls the visible details into these editable fields and never stores the raw file.</p><label className="upload-zone"><input type="file" accept=".txt,.md,.pdf,.json,.csv" onChange={readUpload} /><span className="upload-icon"><Icon name="upload" /></span><b>{parsing ? "Reading your file…" : "Upload resume or LinkedIn export"}</b><small>PDF, TXT, JSON, or CSV · parsed once by Groq</small></label>{parseNote && <p className="parse-note">{parseNote}</p>}<div className="form-grid"><label>Your name<input value={draft.name} onChange={(event) => set("name", event.target.value)} /></label><label>Email for your digest<input type="email" value={draft.email ?? ""} placeholder="you@example.com" onChange={(event) => set("email", event.target.value)} /></label></div><div className="form-grid"><label>Career stage<select value={draft.careerStage} onChange={(event) => set("careerStage", event.target.value)}><option>Student / early career</option><option>Career switcher</option><option>Mid-career builder</option><option>Founder</option></select></label><label>What are you building toward?<input value={draft.goals} placeholder="e.g. Build applied AI products" onChange={(event) => set("goals", event.target.value)} /></label></div><label>Skills <Chips values={draft.skills} onChange={(values) => set("skills", values)} /></label><label>Interests <Chips values={draft.interests} onChange={(values) => set("interests", values)} /></label></>}
+    {step === 2 && <><span className="eyebrow">Location & logistics</span><h1>Where should MEET look?</h1><p className="onboard-intro">Start typing a city, ZIP code, or address, then choose a result. MEET uses its coordinates—not just the text you entered.</p><label>Home base<LocationAutocomplete value={locationQuery} onChange={setLocationQuery} onSelect={chooseLocation} onUseCurrent={applyCurrentLocation} /></label><div className="form-grid location-fields"><label>Travel area<select value={draft.travelRadius} onChange={(event) => set("travelRadius", Number(event.target.value))}>{[3, 5, 10, 15, 25, 40, 60].map((miles) => <option value={miles} key={miles}>{miles} miles</option>)}</select></label><label>Event format<select value={draft.formatPreference} onChange={(event) => set("formatPreference", event.target.value as UserProfile["formatPreference"])}><option value="both">In person + online</option><option value="in-person">In person only</option><option value="online">Online only</option></select></label><label>Best times<select value={draft.availability} onChange={(event) => set("availability", event.target.value as UserProfile["availability"])}><option value="evenings">Weekday evenings</option><option value="weekdays">Weekdays</option><option value="weekends">Weekends</option><option value="flexible">Any time</option></select></label></div><LocationRadiusMap latitude={draft.latitude} longitude={draft.longitude} location={draft.location} radius={draft.travelRadius} /></>}
     {step === 3 && <><span className="eyebrow">Ready to discover</span><h1>MEET will use your story—not sliders.</h1><p className="onboard-intro">Your goals, skills, interests, schedule, format choice, and travel area shape the feed. You can update any of them in Settings.</p><div className="signal-receipt"><article><span>Looking for</span><b>{draft.goals || "The opportunities that fit your next step"}</b></article><article><span>Near</span><b>{draft.location || "your selected home base"} · {draft.travelRadius} mi</b></article><article><span>Schedule</span><b>{draft.availability === "flexible" ? "Any time" : draft.availability.replace("weekdays", "weekdays")}</b></article></div><label className="missed-field">A past opportunity you wish you hadn’t missed <small>Optional — helps MEET understand the kinds of rooms you want to catch sooner.</small><input value={missed} onChange={(event) => setMissed(event.target.value)} placeholder="e.g. local climate hackathon, Spring 2025" /></label></>}
     <div className="onboard-actions"><button className="text-button" onClick={() => step === 1 ? onBack() : setStep(step - 1)}>{step === 1 ? "Back" : "Previous"}</button><button className="button" onClick={() => step === 3 ? onFinish(draft) : setStep(step + 1)}>{step === 3 ? "See my opportunities" : "Continue"}<Icon name="arrow" /></button></div>
   </section></main>;
 }
 
-function SignInModal({ onClose }: { onClose: () => void }) {
-  const [email, setEmail] = useState(""); const [status, setStatus] = useState(""); const [sending, setSending] = useState(false);
-  async function submit() { const supabase = createSupabaseBrowserClient(); if (!supabase) { setStatus("Supabase is not connected yet. Add the public URL and publishable key to .env.local first."); return; } setSending(true); const { error } = await supabase.auth.signInWithOtp({ email, options: { emailRedirectTo: window.location.origin } }); setSending(false); setStatus(error ? error.message : "Check your inbox for a secure MEET sign-in link."); }
-  return <div className="modal-backdrop" onMouseDown={onClose}><section className="signin-modal" role="dialog" aria-modal="true" onMouseDown={(event) => event.stopPropagation()}><button className="modal-close" onClick={onClose}><Icon name="close" /></button><span className="brand-mini"><Icon name="spark" size={16} /> MEET</span><h2>Welcome back.</h2><p>Sign in to keep your profile, decisions, and network synced privately.</p><label>Email<input type="email" placeholder="you@example.com" value={email} onChange={(event) => setEmail(event.target.value)} /></label><button className="button full" onClick={submit} disabled={!email || sending}>{sending ? "Sending…" : "Email me a sign-in link"}<Icon name="mail" size={16} /></button>{status && <p className="signin-status">{status}</p>}<small>We use Supabase Auth. Your opportunity data is protected by row-level security.</small></section></div>;
+function SignInModal({ onClose, onAuthenticated }: { onClose: () => void; onAuthenticated: (accessToken: string) => Promise<void> }) {
+  const [mode, setMode] = useState<"signin" | "signup">("signin");
+  const [name, setName] = useState(""); const [email, setEmail] = useState(""); const [password, setPassword] = useState(""); const [status, setStatus] = useState(""); const [sending, setSending] = useState(false);
+  async function submit() {
+    const supabase = createSupabaseBrowserClient();
+    if (!supabase) { setStatus("Supabase is not connected yet. Add the public URL and publishable key to .env.local first."); return; }
+    if (mode === "signup" && !name.trim()) { setStatus("Add your name to create an account."); return; }
+    if (password.length < 8) { setStatus("Use a password with at least 8 characters."); return; }
+    setSending(true); setStatus("");
+    try {
+      const result = mode === "signup"
+        ? await supabase.auth.signUp({ email: email.trim(), password, options: { emailRedirectTo: `${window.location.origin}/auth/callback`, data: { full_name: name.trim() } } })
+        : await supabase.auth.signInWithPassword({ email: email.trim(), password });
+      if (result.error) { setStatus(result.error.message); return; }
+      if (result.data.session) { await onAuthenticated(result.data.session.access_token); onClose(); return; }
+      setStatus("Check your inbox to confirm your account, then come back to sign in.");
+    } catch (error) { setStatus(error instanceof Error ? error.message : "We could not complete that request."); }
+    finally { setSending(false); }
+  }
+  const creating = mode === "signup";
+  return <div className="modal-backdrop" onMouseDown={onClose}><section className="signin-modal" role="dialog" aria-modal="true" aria-label={creating ? "Create a MEET account" : "Sign in to MEET"} onMouseDown={(event) => event.stopPropagation()}><button className="modal-close" onClick={onClose} aria-label="Close account dialog"><Icon name="close" /></button><span className="brand-mini"><Icon name="spark" size={16} /> MEET</span><div className="account-tabs"><button className={!creating ? "active" : ""} onClick={() => { setMode("signin"); setStatus(""); }}>Sign in</button><button className={creating ? "active" : ""} onClick={() => { setMode("signup"); setStatus(""); }}>Create account</button></div><h2>{creating ? "Make your MEET account." : "Welcome back."}</h2><p>{creating ? "Keep your profile, opportunities, and decisions private and available on every device." : "Sign in to continue with your saved MEET profile."}</p>{creating && <label>Name<input autoComplete="name" placeholder="Your name" value={name} onChange={(event) => setName(event.target.value)} /></label>}<label>Email<input autoComplete="email" type="email" placeholder="you@example.com" value={email} onChange={(event) => setEmail(event.target.value)} /></label><label>Password<input autoComplete={creating ? "new-password" : "current-password"} type="password" placeholder="At least 8 characters" value={password} onChange={(event) => setPassword(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") void submit(); }} /></label><button className="button full" onClick={() => void submit()} disabled={!email || !password || sending}>{sending ? "Working…" : creating ? "Create account" : "Sign in"}<Icon name={creating ? "arrow" : "check"} size={16} /></button>{status && <p className="signin-status">{status}</p>}<small>MEET uses Supabase Auth. Your private records stay protected by row-level security.</small></section></div>;
 }
 
 export function MeetApp() {
   const [stage, setStage] = useState<Stage>("landing");
   const [profile, setProfile] = useState<UserProfile>(defaultProfile);
   const [tab, setTab] = useState<Tab>("discover");
-  const [events, setEvents] = useState<Opportunity[]>(() => makeDemoEvents().map((event) => ({ ...event, relevanceMethod: "fallback" as const })));
+  const [events, setEvents] = useState<Opportunity[]>([]);
   const [ledger, setLedger] = useState<LedgerEntry[]>(initialLedger);
-  const [sourceMode, setSourceMode] = useState<"live" | "demo" | "empty">("demo");
+  const [sourceMode, setSourceMode] = useState<"live" | "demo" | "empty" | "idle">("idle");
   const [selected, setSelected] = useState<Opportunity | null>(null);
   const [actions, setActions] = useState<Record<string, EventAction>>({});
   const [filter, setFilter] = useState("all");
@@ -197,33 +222,98 @@ export function MeetApp() {
   const [refreshing, setRefreshing] = useState(false);
   const [showSignIn, setShowSignIn] = useState(false);
   const [toast, setToast] = useState("");
+  const [authenticated, setAuthenticated] = useState(false);
+  const [digestFrequency, setDigestFrequency] = useState<"daily" | "weekly" | "on-demand">("weekly");
+  const supabaseReady = supabaseBrowserConfigured();
+
+  const applyAccountPayload = useCallback((payload: AccountProfilePayload) => {
+    setProfile(payload.profile);
+    window.localStorage.setItem("meet-profile", JSON.stringify(payload.profile));
+    setDigestFrequency(payload.digestFrequency ?? "weekly");
+    setAuthenticated(true);
+    setStage(payload.onboardingCompleted ? "app" : "onboarding");
+  }, []);
+
+  const hydrateAuthenticatedAccount = useCallback(async (accessToken: string) => {
+    const payload = await accountProfile(accessToken);
+    applyAccountPayload(payload);
+    const savedActions = await accountActions(accessToken).catch(() => null);
+    if (savedActions) setActions(savedActions);
+  }, [applyAccountPayload]);
+
+  const persistAccountProfile = useCallback(async (next: UserProfile, options: { digestFrequency?: "daily" | "weekly" | "on-demand"; completeOnboarding?: boolean } = {}) => {
+    const supabase = createSupabaseBrowserClient();
+    if (!supabase) return false;
+    const { data: { session } } = await supabase.auth.getSession();
+    if (!session) return false;
+    try {
+      const payload = await accountProfile(session.access_token, { profile: next, digestFrequency: options.digestFrequency, completeOnboarding: options.completeOnboarding });
+      applyAccountPayload(payload);
+      return true;
+    } catch (error) {
+      setToast(error instanceof Error ? `Saved locally; cloud sync needs attention: ${error.message}` : "Saved locally; cloud sync needs attention.");
+      return false;
+    }
+  }, [applyAccountPayload]);
+
   useEffect(() => {
     const saved = window.localStorage.getItem("meet-profile");
     const savedActions = window.localStorage.getItem("meet-actions");
-    const restore = window.setTimeout(() => {
-      if (saved) { try { setProfile(JSON.parse(saved)); setStage("app"); } catch { /* ignore malformed local state */ } }
-      if (savedActions) { try { setActions(JSON.parse(savedActions)); } catch { /* ignore malformed local state */ } }
-    }, 0);
-    return () => window.clearTimeout(restore);
-  }, []);
+    const supabase = createSupabaseBrowserClient();
+    let mounted = true;
+    const restoreLocal = () => {
+      if (saved) { try { setProfile(JSON.parse(saved) as UserProfile); setStage("app"); } catch { /* ignore malformed local state */ } }
+    };
+    const restore = async () => {
+      if (savedActions) { try { if (mounted) setActions(JSON.parse(savedActions) as Record<string, EventAction>); } catch { /* ignore malformed local state */ } }
+      if (supabase) {
+        const { data: { session } } = await supabase.auth.getSession();
+        if (session) {
+          try { await hydrateAuthenticatedAccount(session.access_token); return; }
+          catch (error) { if (mounted) { setAuthenticated(true); setToast(error instanceof Error ? `Signed in, but cloud profile sync needs attention: ${error.message}` : "Signed in, but cloud profile sync needs attention."); } }
+        }
+      }
+      if (mounted) restoreLocal();
+    };
+    void restore();
+    const listener = supabase?.auth.onAuthStateChange((_event, session) => {
+      if (!mounted) return;
+      if (!session) { setAuthenticated(false); return; }
+      void hydrateAuthenticatedAccount(session.access_token).catch(() => setAuthenticated(true));
+    });
+    return () => { mounted = false; listener?.data.subscription.unsubscribe(); };
+  }, [hydrateAuthenticatedAccount]);
   useEffect(() => { if (toast) { const id = window.setTimeout(() => setToast(""), 3500); return () => window.clearTimeout(id); } }, [toast]);
-  const updateAction = (event: Opportunity, action: EventAction) => { setActions((current) => { const next = { ...current, [event.id]: action }; window.localStorage.setItem("meet-actions", JSON.stringify(next)); return next; }); setToast(action === "going" ? `You’re going to ${event.title}.` : action === "saved" ? `${event.title} saved.` : "Preference updated."); };
-  const finishOnboarding = (next: UserProfile) => { setProfile(next); window.localStorage.setItem("meet-profile", JSON.stringify(next)); setEvents([]); setSourceMode("empty"); setStage("app"); setToast("Finding opportunities around your selected home base…"); void refresh(next); };
+  const persistEventAction = async (event: Opportunity, action: EventAction) => {
+    const supabase = createSupabaseBrowserClient();
+    const session = supabase ? (await supabase.auth.getSession()).data.session : null;
+    if (!session || event.sourceType === "demo") return;
+    try {
+      const response = await fetch("/api/account/preferences", { method: "PUT", headers: { "Content-Type": "application/json", Authorization: `Bearer ${session.access_token}` }, body: JSON.stringify({ event: { id: event.id, url: event.url }, action }) });
+      const result = await responseJson<{ persisted?: boolean; error?: string }>(response);
+      if (!response.ok) setToast(result.error || "Your decision is saved locally; cloud sync needs attention.");
+    } catch { setToast("Your decision is saved locally; cloud sync needs attention."); }
+  };
+  const updateAction = (event: Opportunity, action: EventAction) => { setActions((current) => { const next = { ...current, [event.id]: action }; window.localStorage.setItem("meet-actions", JSON.stringify(next)); return next; }); setToast(action === "going" ? `You’re going to ${event.title}.` : action === "saved" ? `${event.title} saved.` : "Preference updated."); void persistEventAction(event, action); };
+  const finishOnboarding = (next: UserProfile) => { setProfile(next); window.localStorage.setItem("meet-profile", JSON.stringify(next)); setEvents([]); setSourceMode("idle"); setStage("app"); setToast("Finding opportunities around your selected home base…"); void persistAccountProfile(next, { completeOnboarding: true, digestFrequency }); void refresh(next); };
   const logOut = async () => {
     const supabase = createSupabaseBrowserClient();
     if (supabase) await supabase.auth.signOut();
     window.localStorage.removeItem("meet-profile");
     window.localStorage.removeItem("meet-actions");
-    setActions({}); setProfile(defaultProfile); setEvents(makeDemoEvents().map((event) => ({ ...event, relevanceMethod: "fallback" as const }))); setSourceMode("demo"); setSelected(null); setStage("landing");
+    setActions({}); setProfile(defaultProfile); setEvents([]); setSourceMode("idle"); setSelected(null); setAuthenticated(false); setStage("landing");
   };
   const refresh = async (profileToRefresh: UserProfile = profile) => { setRefreshing(true); setLedger((current) => [{ id: "refreshing", kind: "system", status: "running", title: "Refreshing MEET", detail: "Fast, bounded source checks are running for your selected area.", at: "now" }, ...current]); try { const supabase = createSupabaseBrowserClient(); const session = supabase ? (await supabase.auth.getSession()).data.session : null; const response = await fetch("/api/pipeline/refresh", { method: "POST", headers: { "Content-Type": "application/json", ...(session ? { Authorization: `Bearer ${session.access_token}` } : {}) }, body: JSON.stringify({ profile: profileToRefresh }) }); const result = await responseJson<RefreshResult & { error?: string }>(response); if (!response.ok) throw new Error(result.error || "The pipeline could not refresh."); setEvents(result.events); setLedger(result.ledger); setSourceMode(result.mode); setToast(result.mode === "live" ? "Fresh opportunities are ready." : result.mode === "empty" ? "Live sources are connected, but no nearby events were found yet." : "No live source is configured — showing the labeled sample feed."); } catch (error) { setToast(error instanceof Error ? error.message : "Refresh failed."); setLedger((current) => [{ id: "error", kind: "system", status: "attention", title: "Refresh needs attention", detail: "The existing feed is still available.", at: "now" }, ...current.filter((item) => item.id !== "refreshing")]); } finally { setRefreshing(false); } };
   const categories = ["all", ...Array.from(new Set(events.map((event) => event.category)))];
   const filtered = useMemo(() => events.filter((event) => actions[event.id] !== "dismissed" && (filter === "all" || event.category === filter) && (format === "all" || event.format === format)), [events, actions, filter, format]);
   const top = filtered.filter((event) => (event.score?.final ?? 0) >= 6.3); const low = filtered.filter((event) => (event.score?.final ?? 0) < 6.3).slice(0, 2);
-  if (stage === "landing") return <><Landing onStart={() => setStage("onboarding")} onSignIn={() => setShowSignIn(true)} />{showSignIn && <SignInModal onClose={() => setShowSignIn(false)} />}</>;
+  const accountReady = async (accessToken: string) => { await hydrateAuthenticatedAccount(accessToken); setToast("Your MEET account is ready."); };
+  const syncStatus = sourceMode === "live" ? "Live sources connected" : sourceMode === "empty" ? "Live sources connected · no nearby events yet" : sourceMode === "demo" ? "Sample mode — add sources to go live" : "Ready to refresh sources";
+  const syncDot = sourceMode === "live" ? "live-dot" : sourceMode === "demo" ? "demo-dot" : "empty-dot";
+  if (stage === "landing") return <><Landing onStart={() => setStage("onboarding")} onSignIn={() => setShowSignIn(true)} />{showSignIn && <SignInModal onClose={() => setShowSignIn(false)} onAuthenticated={accountReady} />}</>;
   if (stage === "onboarding") return <Onboarding profile={profile} onFinish={finishOnboarding} onBack={() => setStage("landing")} />;
   const nav: { key: Tab; label: string; icon: string }[] = [{ key: "discover", label: "Discover", icon: "compass" }, { key: "ledger", label: "Trust ledger", icon: "ledger" }, { key: "network", label: "Network", icon: "people" }, { key: "settings", label: "Settings", icon: "settings" }];
-  return <main className="app-shell"><aside className="sidebar"><div className="brand"><span><Icon name="spark" size={18} /></span>MEET</div><div className="nav-group">{nav.map((item) => <button className={tab === item.key ? "nav-item active" : "nav-item"} key={item.key} onClick={() => setTab(item.key)}><Icon name={item.icon} size={18} />{item.label}{item.key === "ledger" && <i className="nav-pulse" />}</button>)}</div><div className="sidebar-bottom"><button className={tab === "about" ? "nav-item active" : "nav-item"} onClick={() => setTab("about")}><Icon name="info" size={18} />Why MEET</button><button className="user-chip" onClick={() => setShowSignIn(true)}><span>{profile.name.slice(0, 1).toUpperCase()}</span><div><b>{profile.name}</b><small>Account</small></div></button><button className="nav-item logout-button" onClick={logOut}><Icon name="logout" size={18} />Log out</button></div></aside><section className="workspace"><header className="topbar"><div className="mobile-brand brand"><span><Icon name="spark" size={16} /></span>MEET</div><div className="sync-status"><span className={sourceMode === "live" ? "live-dot" : sourceMode === "empty" ? "empty-dot" : "demo-dot"} />{sourceMode === "live" ? "Live sources connected" : sourceMode === "empty" ? "Live sources connected · no nearby events yet" : "Sample mode — add sources to go live"}</div><button className="refresh-button" onClick={() => refresh()} disabled={refreshing}><Icon name="refresh" size={17} />{refreshing ? "Refreshing…" : "Refresh MEET"}</button></header>{tab === "discover" && <Discover profile={profile} categories={categories} filter={filter} setFilter={setFilter} format={format} setFormat={setFormat} top={top} low={low} actions={actions} onAction={updateAction} onSelect={setSelected} />}{tab === "ledger" && <Ledger ledger={ledger} />}{tab === "network" && <Network />}{tab === "settings" && <Settings profile={profile} setProfile={setProfile} events={events} setToast={setToast} />}{tab === "about" && <About />}</section>{selected && <EventDetail event={selected} action={actions[selected.id]} onClose={() => setSelected(null)} onAction={(action) => updateAction(selected, action)} />}{showSignIn && <SignInModal onClose={() => setShowSignIn(false)} />}{toast && <div className="toast"><Icon name="check" size={16} />{toast}</div>}</main>;
+  return <main className="app-shell"><aside className="sidebar"><div className="brand"><span><Icon name="spark" size={18} /></span>MEET</div><div className="nav-group">{nav.map((item) => <button className={tab === item.key ? "nav-item active" : "nav-item"} key={item.key} onClick={() => setTab(item.key)}><Icon name={item.icon} size={18} />{item.label}{item.key === "ledger" && <i className="nav-pulse" />}</button>)}</div><div className="sidebar-bottom"><button className={tab === "about" ? "nav-item active" : "nav-item"} onClick={() => setTab("about")}><Icon name="info" size={18} />Why MEET</button><button className="user-chip" onClick={() => authenticated ? setTab("settings") : setShowSignIn(true)}><span>{profile.name.slice(0, 1).toUpperCase()}</span><div><b>{profile.name}</b><small>{authenticated ? "Signed in" : supabaseReady ? "Local profile · sign in" : "Local profile"}</small></div></button><button className="nav-item logout-button" onClick={() => void logOut()}><Icon name="logout" size={18} />{authenticated ? "Log out" : "Clear profile"}</button></div></aside><section className="workspace"><header className="topbar"><div className="mobile-brand brand"><span><Icon name="spark" size={16} /></span>MEET</div><div className="sync-status"><span className={syncDot} />{syncStatus}</div><button className="refresh-button" onClick={() => void refresh()} disabled={refreshing}><Icon name="refresh" size={17} />{refreshing ? "Refreshing…" : "Refresh MEET"}</button></header>{tab === "discover" && <Discover profile={profile} categories={categories} filter={filter} setFilter={setFilter} format={format} setFormat={setFormat} top={top} low={low} actions={actions} onAction={updateAction} onSelect={setSelected} />}{tab === "ledger" && <Ledger ledger={ledger} />}{tab === "network" && <Network />}{tab === "settings" && <Settings key={`${profile.name}-${profile.email ?? ""}-${profile.location}-${digestFrequency}`} profile={profile} events={events} frequency={digestFrequency} onSave={async (next, frequency) => { setProfile(next); window.localStorage.setItem("meet-profile", JSON.stringify(next)); setDigestFrequency(frequency); const synced = await persistAccountProfile(next, { digestFrequency: frequency }); setToast(synced ? "Preferences saved to your MEET account." : "Preferences saved on this device. Sign in to sync them."); }} setToast={setToast} />}{tab === "about" && <About />}</section>{selected && <EventDetail event={selected} action={actions[selected.id]} onClose={() => setSelected(null)} onAction={(action) => updateAction(selected, action)} />}{showSignIn && <SignInModal onClose={() => setShowSignIn(false)} onAuthenticated={accountReady} />}{toast && <div className="toast"><Icon name="check" size={16} />{toast}</div>}</main>;
 }
 
 function Discover({ profile, categories, filter, setFilter, format, setFormat, top, low, actions, onAction, onSelect }: { profile: UserProfile; categories: string[]; filter: string; setFilter: (value: string) => void; format: string; setFormat: (value: string) => void; top: Opportunity[]; low: Opportunity[]; actions: Record<string, EventAction>; onAction: (event: Opportunity, action: EventAction) => void; onSelect: (event: Opportunity) => void }) {
@@ -236,14 +326,37 @@ function Ledger({ ledger }: { ledger: LedgerEntry[] }) { const total = ledger.fi
 
 function Network() { const [email, setEmail] = useState(""); const [requested, setRequested] = useState(false); const [requestNote, setRequestNote] = useState(""); const friends = [{ name: "Maya Chen", handle: "@mayacodes", note: "Going to Open Source for Education Sprint", initials: "MC" }, { name: "Jordan Bell", handle: "@jordansbuilds", note: "Going to AI Build Night + 1 more", initials: "JB" }, { name: "Priya Shah", handle: "@priyashah", note: "Going to Build Week", initials: "PS" }]; const sendRequest = async () => { if (!email) return; const supabase = createSupabaseBrowserClient(); if (!supabase) { setRequestNote("Connect Supabase and sign in to send a real request."); return; } const { error } = await supabase.rpc("request_connection_by_identifier", { identifier: email }); if (error) { setRequestNote(error.message); return; } setRequested(true); setRequestNote("Connection request sent."); setEmail(""); }; return <div className="page network-page"><header className="page-title"><div><span className="eyebrow">Your small, useful network</span><h1>Go where your people are.</h1><p>Connections are private and only power attendance context — no feed, no noise.</p></div></header><section className="network-add"><div><span className="eyebrow">Add a connection</span><h2>Know someone who should be in the room?</h2></div><div className="add-form"><input value={email} onChange={(event) => setEmail(event.target.value)} placeholder="Email or username" /><button className="button" onClick={sendRequest}>{requested ? "Request sent" : "Send request"}</button></div></section>{requestNote && <p className="network-note">{requestNote}</p>}<section className="friends-list"><div className="section-heading"><div><span className="eyebrow">Accepted connections</span><h2>3 people in your network</h2></div></div>{friends.map((friend, index) => <article className="friend-card" key={friend.name}><span className={`friend-avatar f${index}`}>{friend.initials}</span><div><h3>{friend.name} <small>{friend.handle}</small></h3><p><span className="going-dot" />{friend.note}</p></div><button className="text-button">Remove</button></article>)}</section><section className="network-privacy"><Icon name="info" /><div><b>Attendance is visible only to accepted connections.</b><p>This is enforced in Supabase with Row Level Security; MEET never exposes a public attendance directory.</p></div></section></div>; }
 
-function Settings({ profile, setProfile, events, setToast }: { profile: UserProfile; setProfile: (profile: UserProfile) => void; events: Opportunity[]; setToast: (value: string) => void }) {
-  const [draft, setDraft] = useState(profile); const [frequency, setFrequency] = useState("weekly");
+function Settings({ profile, events, frequency, onSave, setToast }: { profile: UserProfile; events: Opportunity[]; frequency: "daily" | "weekly" | "on-demand"; onSave: (profile: UserProfile, frequency: "daily" | "weekly" | "on-demand") => Promise<void>; setToast: (value: string) => void }) {
+  const [draft, setDraft] = useState(profile); const [locationQuery, setLocationQuery] = useState(profile.location); const [draftFrequency, setDraftFrequency] = useState(frequency); const [saving, setSaving] = useState(false);
   const change = <K extends keyof UserProfile>(key: K, value: UserProfile[K]) => setDraft((current) => ({ ...current, [key]: value }));
-  const selectedHome = LOCATION_OPTIONS.some((option) => option.label === draft.location) ? draft.location : "__current__";
-  const setHome = (label: string) => { const option = LOCATION_OPTIONS.find((item) => item.label === label); if (option) setDraft((current) => ({ ...current, location: option.label, latitude: option.latitude, longitude: option.longitude })); };
-  const save = () => { setProfile(draft); window.localStorage.setItem("meet-profile", JSON.stringify(draft)); setToast("Preferences saved. Refresh MEET to apply them to live discovery."); };
-  const sendDigest = async () => { if (!draft.email) { setToast("Add an email address before sending a test digest."); return; } const response = await fetch("/api/digest", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ email: draft.email, name: draft.name, events }) }); const result = await response.json(); setToast(response.ok ? "Test digest sent." : result.error || "Could not send digest."); };
-  return <div className="page settings-page"><header className="page-title"><div><span className="eyebrow">YOUR PREFERENCES</span><h1>Settings</h1><p>Tell MEET what matters; it handles the ordering in the background.</p></div></header><section className="settings-card"><div><span className="eyebrow">DIGEST DELIVERY</span><h2>Let the signal come to you.</h2><p>Choose when you want a concise email digest.</p></div><div className="settings-fields"><label>Email for digest<input type="email" value={draft.email ?? ""} placeholder="you@example.com" onChange={(event) => change("email", event.target.value)} /></label><label>Frequency<select value={frequency} onChange={(event) => setFrequency(event.target.value)}><option value="daily">Daily</option><option value="weekly">Weekly</option><option value="on-demand">On demand</option></select></label><button className="text-button send-test" onClick={sendDigest}><Icon name="mail" size={15} />Send a test digest</button></div></section><section className="settings-card location-settings"><div><span className="eyebrow">DISCOVERY AREA</span><h2>Keep the feed practical.</h2><p>Selecting a city immediately updates the live map and distance calculations.</p></div><div className="settings-fields two"><label>Home base<select value={selectedHome} onChange={(event) => setHome(event.target.value)}>{LOCATION_OPTIONS.map((option) => <option value={option.label} key={option.label}>{option.label}</option>)}{selectedHome === "__current__" && <option value="__current__">Current location</option>}</select></label><label>Travel area<select value={draft.travelRadius} onChange={(event) => change("travelRadius", Number(event.target.value))}>{[3, 5, 10, 15, 25, 40, 60].map((miles) => <option value={miles} key={miles}>{miles} miles</option>)}</select></label><label>Format<select value={draft.formatPreference} onChange={(event) => change("formatPreference", event.target.value as UserProfile["formatPreference"])}><option value="both">In person + online</option><option value="in-person">In person only</option><option value="online">Online only</option></select></label></div><LocationRadiusMap latitude={draft.latitude} longitude={draft.longitude} location={draft.location} radius={draft.travelRadius} /></section><section className="settings-card profile-reminder"><div><span className="eyebrow">HOW RESULTS ARE ORDERED</span><h2>Your words do the work.</h2><p>Goals, skills, interests, schedule, format, and distance guide the feed. There are no ranking sliders to maintain.</p></div><button className="text-button" onClick={() => setToast("Update your goals and interests by restarting onboarding from the MEET home page.")}>How matching works <Icon name="arrow" size={15} /></button></section><button className="button save-settings" onClick={save}>Save changes <Icon name="check" size={16} /></button></div>;
+  const setHome = (choice: LocationChoice) => { setDraft((current) => ({ ...current, location: choice.label, latitude: choice.latitude, longitude: choice.longitude })); setLocationQuery(choice.label); };
+  const useCurrentLocation = () => {
+    if (!navigator.geolocation) { setToast("This browser does not support location access. Search for a city, ZIP code, or address instead."); return; }
+    setToast("Finding your current location…");
+    navigator.geolocation.getCurrentPosition(async (position) => {
+      const latitude = position.coords.latitude; const longitude = position.coords.longitude;
+      try {
+        const response = await fetch("/api/location", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ latitude, longitude }) });
+        const result = await responseJson<{ label?: string }>(response);
+        const label = response.ok && result.label ? result.label : "Current location";
+        setDraft((current) => ({ ...current, latitude, longitude, location: label })); setLocationQuery(label);
+        setToast("Your current location now centers the discovery map.");
+      } catch {
+        setDraft((current) => ({ ...current, latitude, longitude, location: "Current location" })); setLocationQuery("Current location");
+        setToast("Your current location now centers the discovery map.");
+      }
+    }, () => setToast("Location access was not granted. Search for a city, ZIP code, or address instead."), { enableHighAccuracy: false, timeout: 8000 });
+  };
+  const save = async () => { setSaving(true); try { await onSave(draft, draftFrequency); } finally { setSaving(false); } };
+  const sendDigest = async () => {
+    if (!draft.email) { setToast("Add an email address before sending a test digest."); return; }
+    try {
+      const response = await fetch("/api/digest", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ email: draft.email, name: draft.name, events }) });
+      const result = await responseJson<{ error?: string }>(response);
+      setToast(response.ok ? "Test digest sent." : result.error || "Could not send digest.");
+    } catch { setToast("Could not send the test digest."); }
+  };
+  return <div className="page settings-page"><header className="page-title"><div><span className="eyebrow">YOUR PREFERENCES</span><h1>Settings</h1><p>Tell MEET what matters; it handles the ordering in the background.</p></div></header><section className="settings-card"><div><span className="eyebrow">DIGEST DELIVERY</span><h2>Let the signal come to you.</h2><p>Choose when you want a concise email digest.</p></div><div className="settings-fields"><label>Email for digest<input type="email" value={draft.email ?? ""} placeholder="you@example.com" onChange={(event) => change("email", event.target.value)} /></label><label>Frequency<select value={draftFrequency} onChange={(event) => setDraftFrequency(event.target.value as "daily" | "weekly" | "on-demand")}><option value="daily">Daily</option><option value="weekly">Weekly</option><option value="on-demand">On demand</option></select></label><button className="text-button send-test" onClick={() => void sendDigest()}><Icon name="mail" size={15} />Send a test digest</button></div></section><section className="settings-card location-settings"><div><span className="eyebrow">DISCOVERY AREA</span><h2>Keep the feed practical.</h2><p>Search for a real place or use your current location to update the live map and distance calculations.</p></div><div className="settings-fields two"><label>Home base<LocationAutocomplete value={locationQuery} onChange={setLocationQuery} onSelect={setHome} onUseCurrent={useCurrentLocation} /></label><label>Travel area<select value={draft.travelRadius} onChange={(event) => change("travelRadius", Number(event.target.value))}>{[3, 5, 10, 15, 25, 40, 60].map((miles) => <option value={miles} key={miles}>{miles} miles</option>)}</select></label><label>Format<select value={draft.formatPreference} onChange={(event) => change("formatPreference", event.target.value as UserProfile["formatPreference"])}><option value="both">In person + online</option><option value="in-person">In person only</option><option value="online">Online only</option></select></label></div><LocationRadiusMap latitude={draft.latitude} longitude={draft.longitude} location={draft.location} radius={draft.travelRadius} /></section><section className="settings-card profile-reminder"><div><span className="eyebrow">HOW RESULTS ARE ORDERED</span><h2>Your words do the work.</h2><p>Goals, skills, interests, schedule, format, and distance guide the feed. There are no ranking sliders to maintain.</p></div><button className="text-button" onClick={() => setToast("Update your goals and interests by restarting onboarding from the MEET home page.")}>How matching works <Icon name="arrow" size={15} /></button></section><button className="button save-settings" onClick={() => void save()} disabled={saving}>{saving ? "Saving…" : "Save changes"} <Icon name="check" size={16} /></button></div>;
 }
 
 function About() { return <div className="page about-page"><header className="about-hero"><span className="eyebrow">Why MEET</span><h1>Opportunity shouldn’t be a rumor you have to be lucky enough to overhear.</h1><p>MEET started with a familiar kind of miss: learning about the exact right hackathon six days too late, by overhearing a Discord conversation. Not because of a lack of ability or effort — because there was no system built to reach the right person early enough.</p></header><section className="about-grid"><article><span>01</span><h2>Find</h2><p>We gather from APIs, structured feeds, and a small set of permission-safe sources in parallel.</p></article><article><span>02</span><h2>Reason</h2><p>We use a small, fast Groq model only where language understanding matters — profile, extraction, relevance.</p></article><article><span>03</span><h2>Show the work</h2><p>Every match, merge, and low score comes with the evidence needed to question it.</p></article></section><section className="about-principle"><Icon name="spark" size={28} /><div><span className="eyebrow">The principle</span><h2>Foresight should be infrastructure.</h2><p>There is plenty of noise. The useful part is a system that notices the few rooms where your next collaborator, skill, or chance might be waiting — and tells you why it thinks so.</p></div></section></div>; }

@@ -8,13 +8,13 @@ MEET is a transparent opportunity-intelligence product for events, hackathons, w
 
 - A polished responsive Next.js product: landing page, three-step profile onboarding, ranked dashboard, filters, event detail, score breakdown, network, settings, About page, and a live Trust Ledger.
 - Resume and LinkedIn-export ingestion. Text, CSV, JSON, and text-based PDF uploads are parsed once into editable skills, interests, stage, and goals.
-- Four parallel ingestion strategies: Eventbrite, an RSS/ICS-style event feed, up to three permission-safe curated HTML seed pages, and compliant Exa-backed open-web discovery.
+- Three parallel live ingestion strategies: up to six RSS/ICS calendars, up to three permission-safe curated HTML seed pages, and compliant Exa-backed open-web discovery. Eventbrite's retired public location-search endpoint is deliberately skipped instead of producing a 404.
 - Every web-discovered event retains its discovery query, original public source URL/domain, extraction method, confidence, and short page evidence. The event detail view exposes this provenance.
 - Deterministic deduplication, ranking math, filters, score explanations, feedback actions, and portfolio insights.
 - Groq-powered profile extraction, permitted-page event extraction, and semantic relevance only.
-- Supabase Auth magic links, a complete Postgres schema, network and attendance tables, and Row Level Security policies.
+- Supabase email/password authentication, persisted profiles, event decisions and attendance, a complete Postgres schema, and Row Level Security policies.
 - Resend digest endpoint, with a “send test digest” control.
-- A clearly labeled sample mode, so the product is immediately explorable before any external keys are connected. It never presents samples as live source data.
+- A clearly labeled sample mode, so the product is immediately explorable before any live source is connected. It never presents samples as live source data or mixes them into a configured refresh.
 
 ## AI is deliberately narrow
 
@@ -41,9 +41,9 @@ cp .env.example .env.local
 npm run dev
 ```
 
-Visit [http://localhost:3000](http://localhost:3000). The sample experience runs without any environment variables.
+Visit [http://localhost:3000](http://localhost:3000). You can explore locally without service credentials.
 
-After adding keys to `.env.local`, restart the dev server so Next.js reloads them, then select **Refresh MEET** in the top-right of the app. A live refresh uses only the source keys you configured; if no live source returns events, the app deliberately falls back to its labeled sample feed.
+After adding keys to `.env.local`, restart the dev server so Next.js reloads them, then select **Refresh MEET** in the top-right of the app. A refresh with a configured live source never shows sample cards: it reports an empty live result when nothing usable is found.
 
 For a production build:
 
@@ -65,7 +65,7 @@ npm run build
    supabase db push
    ```
 
-3. In Supabase Auth, enable email magic links and add your local and Vercel URLs as redirect URLs.
+3. In Supabase Auth, enable the Email provider with email/password sign-in. Set your Site URL and add `http://localhost:3000/auth/callback` plus your deployed `/auth/callback` URL to Redirect URLs. Email confirmation may remain enabled.
 4. Copy the project URL, publishable key, and service-role key into `.env.local`.
 
 The migrations at [`supabase/migrations`](./supabase/migrations) create profiles, events, scores, refresh runs, pipeline logs, dedup decisions, preferences, connections, attendance, missed opportunities, and web-discovery provenance tables. RLS keeps a user’s discovery runs private; raw fetched page text is never persisted.
@@ -78,23 +78,29 @@ Set `GROQ_API_KEY`. The default `GROQ_MODEL=llama-3.1-8b-instant` is intentional
 
 Set whichever sources are available to you:
 
-- `EVENTBRITE_PRIVATE_TOKEN` and optionally `EVENTBRITE_LOCATION`
-- `MEET_RSS_FEED_URL` for a verified community calendar feed
+- `MEET_RSS_FEED_URL` for up to six public RSS or ICS calendars. For McKinney/DFW, copy this into `.env.local`:
+
+  ```bash
+  MEET_RSS_FEED_URL=https://www.tddallas.org/Events/RSS,https://calendar.utdallas.edu/calendar.ics?event_types%5B%5D=30645184548410,https://calendar.utdallas.edu/calendar.ics?event_types%5B%5D=31183765024118,https://calendar.utdallas.edu/calendar.ics?event_types%5B%5D=31183766846447,https://calendar.unt.edu/calendar.ics?event_types%5B%5D=38308632250293
+  ```
+
 - `CRAWL_SEED_URLS` as a comma-separated list of no more than three explicitly permission-safe public event pages
 - `EXA_API_KEY` plus `WEB_DISCOVERY_ENABLED=true` to enable open-web candidate discovery
+
+The feed parser keeps only events in the next 62 days. Leave `WEB_DISCOVERY_ALLOWED_REGIONS` and `WEB_DISCOVERY_BLOCKED_DOMAINS` blank unless you need stricter rules; blank values add no extra restrictions beyond MEET's safe built-in exclusions.
 
 Sources run in parallel. The ledger reports each source’s outcome, normalized count, web queries, skipped candidates, robots decisions, structured/LLM extraction, dedup decision, and score completion.
 
 ### 4. Compliant web discovery
 
-Web discovery is a fourth source strategy; it does not replace Eventbrite, RSS, or curated crawls.
+Web discovery fills gaps after structured calendars; it does not replace RSS/ICS or curated crawls.
 
-1. MEET builds no more than six deterministic location/profile/date-aware queries, and may ask Groq to diversify them when `WEB_DISCOVERY_REFINE_QUERIES=true`.
-2. Exa returns at most 30 **candidate pages**. Search results are never treated as events.
-3. MEET normalizes URLs; removes tracking IDs and duplicates; blocks login-dependent social sites, checkout, private-profile, generic-search, and unsupported-document URLs; then enforces a 15-page total and two-pages-per-domain budget by default.
+1. MEET builds at most four deterministic location/profile/date-aware queries, and may ask Groq to diversify them when `WEB_DISCOVERY_REFINE_QUERIES=true`.
+2. Exa returns at most 20 **candidate pages**. Search results are never treated as events.
+3. MEET normalizes URLs; removes tracking IDs and duplicates; blocks login-dependent social sites, checkout, private-profile, generic-search, Eventbrite, and known event aggregators; then enforces the configured cap (at most eight pages total and one page per domain).
 4. Before every fetch it checks `robots.txt`. A denied or unavailable robots rule is a skip, never a bypass. Fetches are server-side, rate-limited per domain, time-bounded, and retried with small backoff.
 5. MEET prefers JSON-LD Event, RSS/Atom, ICS, and Open Graph-style public metadata. Only when structured Event data is absent does it pass cleaned public page text to Groq.
-6. An extraction is rejected unless it has a title, a valid future date, a valid original source URL, and page evidence. It is also pre-filtered for format preference, known distance/radius, clear irrelevance, and deduplication before batched semantic relevance scoring.
+6. An extraction is rejected unless it has a title, a date in the next 62 days, a valid original source URL, and page evidence. It is also pre-filtered for format preference, known distance/radius, clear irrelevance, and deduplication before batched semantic relevance scoring.
 
 The event detail provenance panel distinguishes **Web-discovered**, **Structured source**, **LLM-reasoned**, and **Computed**. The Trust Ledger lists query generation, candidate screening, robots skips, fetch failures, extraction method, rejected extraction reason, and merges.
 
@@ -119,8 +125,8 @@ All expected values are listed in [`.env.example`](./.env.example).
 | `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY` | Browser auth and database client |
 | `SUPABASE_SERVICE_ROLE_KEY` | Trusted server-side persistence jobs |
 | `GROQ_API_KEY` | Profile parsing, page extraction, relevance reasoning |
-| `EVENTBRITE_API_KEY` | Eventbrite authenticated API access (legacy token also supported) |
-| `MEET_RSS_FEED_URL` | Community feed ingestion |
+| `EVENTBRITE_API_KEY` | Kept for compatibility; MEET does not call Eventbrite's retired public location-search API |
+| `MEET_RSS_FEED_URL` | Comma-separated public RSS or ICS calendar feed URLs (up to 6) |
 | `CRAWL_SEED_URLS` | Permission-safe HTML extraction |
 | `EXA_API_KEY` | Server-side Exa candidate search |
 | `WEB_DISCOVERY_ENABLED` | Explicit opt-in for open-web discovery |
