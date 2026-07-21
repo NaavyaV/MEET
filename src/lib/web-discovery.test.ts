@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { defaultProfile } from "./demo-data";
-import { deduplicate, relevanceFallback } from "./engine";
+import { deduplicate, isEligibleForProfile, relevanceFallback } from "./engine";
 import { Opportunity } from "./types";
 import { buildDiscoveryQueries, getWebDiscoveryConfig, normalizeUrl, robotsAllows, selectCandidates, toProvenanceRecord, validateExtractedEvent } from "./web-discovery";
 
@@ -69,6 +69,12 @@ describe("web discovery decisions", () => {
     const result = validateExtractedEvent({ title: "Regional AI workshop", startsAt: future, sourceUrl: "https://example.edu/events/regional-ai", format: "in-person", latitude: 42.3314, longitude: -83.0458, category: "Workshop", tags: ["AI"], extractionConfidence: 0.9, evidence: ["Regional AI workshop on the event page"], provenance: { extractionMethod: "structured" } }, "https://example.edu/events/regional-ai", profile);
     expect(result.event).toBeNull();
     expect(result.reason).toContain("outside your 5-mile travel area");
+  });
+
+  it("holds an address-only physical page for verification, then keeps it out of the feed until distance is known", () => {
+    const result = validateExtractedEvent({ title: "Local AI workshop", startsAt: future, sourceUrl: "https://example.edu/events/local-ai", format: "in-person", address: "123 Main Street, Chicago, IL", evidence: ["Local AI workshop on the event page"] }, "https://example.edu/events/local-ai", defaultProfile);
+    expect(result.event).toMatchObject({ address: "123 Main Street, Chicago, IL", distanceMiles: null });
+    expect(isEligibleForProfile(result.event!, defaultProfile)).toBe(false);
   });
 
   it("projects source provenance without raw page text", () => {

@@ -1,7 +1,8 @@
 import { deduplicate, isEligibleForProfile } from "./engine";
+import { verifyEventLocations } from "./event-locations";
 import { isWithinUpcomingEventWindow } from "./event-window";
 import { extractEventsWithGroq, groqConfigured } from "./groq";
-import { haversineMiles, validateExtractedEvent, getWebDiscoveryConfig, robotsDecision, runWebDiscovery, WebDiscoveryResult } from "./web-discovery";
+import { haversineMiles, upcomingEventText, validateExtractedEvent, getWebDiscoveryConfig, robotsDecision, runWebDiscovery, WebDiscoveryResult } from "./web-discovery";
 import { LedgerEntry, Opportunity, UserProfile } from "./types";
 
 type SourceStatus = { name: string; count: number; status: "complete" | "skipped" | "attention" };
@@ -31,7 +32,9 @@ export function parseIcs(ics: string, sourceUrl: string, now = new Date(), profi
     const [latitudeText, longitudeText] = icsField(block, "GEO").split(/[;,]/); const latitude = finiteCoordinate(latitudeText); const longitude = finiteCoordinate(longitudeText); const format = inferFormat(`${location} ${description}`); const distanceMiles = locationDistance(profile, latitude, longitude);
     if (!title || !start || !isWithinUpcomingEventWindow(start, now)) return [];
     const event: Opportunity = { id: `ics-${slug(title)}-${start.getTime()}-${index}`, title, source: sourceDomain, sourceType: "rss", url, description, startsAt: start.toISOString(), endsAt: end?.toISOString(), format, venue: location || undefined, latitude, longitude, distanceMiles, category: "Calendar event", tags: [], provenance: { sourceDomain, sourceUrl, extractionMethod: "rss", extractionConfidence: 1, evidence: [`ICS VEVENT: ${title}; DTSTART ${icsField(block, "DTSTART")}`] } };
-    return !profile || isEligibleForProfile(event, profile) ? [event] : [];
+    // Physical calendars commonly contain a venue string but no GEO field.
+    // Keep it until the shared venue verifier runs after all sources finish.
+    return [event];
   });
 }
 
@@ -44,7 +47,7 @@ export function parseRss(xml: string, sourceUrl: string, now = new Date(), profi
     const latitude = finiteCoordinate(textIn(entry, "geo:lat") || textIn(entry, "latitude")); const longitude = finiteCoordinate(textIn(entry, "geo:long") || textIn(entry, "longitude")); const format = inferFormat(`${title} ${description}`); const distanceMiles = locationDistance(profile, latitude, longitude);
     if (!title || !start || !isWithinUpcomingEventWindow(start, now)) return [];
     const event: Opportunity = { id: `rss-${slug(title)}-${index}`, title, source: "Community RSS feed", sourceType: "rss", url: link, description: description || "", startsAt: start.toISOString(), format, latitude, longitude, distanceMiles, category: "Community event", tags: [], provenance: { sourceDomain: new URL(sourceUrl).hostname, sourceUrl, extractionMethod: "rss", extractionConfidence: 1, evidence: [`RSS/Atom item: ${title}; event date ${start.toISOString()}`] } };
-    return !profile || isEligibleForProfile(event, profile) ? [event] : [];
+    return [event];
   });
 }
 
@@ -63,7 +66,7 @@ async function crawlerSource(profile: UserProfile): Promise<SourceLoadResult> {
     if (robot.decision !== "allowed") return null;
     const response = await fetch(url, { next: { revalidate: 0 }, headers: { "User-Agent": config.userAgent }, signal: AbortSignal.timeout(8000) }); if (!response.ok) throw new Error(`${url} returned ${response.status}`); const html = await response.text(); return { url, title: html.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1] ?? "Event page", text: stripHtml(html) };
   }))).filter((page): page is { url: string; title: string; text: string } => Boolean(page));
-  const groups = await Promise.all(pages.map(async (page) => (await extractEventsWithGroq(page)).flatMap((event) => { const validated = validateExtractedEvent({ ...event, source: event.organizer ?? "Permitted seed source", sourceUrl: page.url, provenance: { sourceDomain: new URL(page.url).hostname, sourceUrl: page.url, extractionMethod: "llm", evidence: [], robotsDecision: "allowed" } }, page.url, profile); return validated.event ? [{ ...validated.event, sourceType: "curated-crawler" as const }] : []; })));
+  const groups = await Promise.all(pages.map(async (page) => (await extractEventsWithGroq({ ...page, text: upcomingEventText(page.text) })).flatMap((event) => { const validated = validateExtractedEvent({ ...event, source: event.organizer ?? "Permitted seed source", sourceUrl: page.url, provenance: { sourceDomain: new URL(page.url).hostname, sourceUrl: page.url, extractionMethod: "llm", evidence: [], robotsDecision: "allowed" } }, page.url, profile); return validated.event ? [{ ...validated.event, sourceType: "curated-crawler" as const }] : []; })));
   return { events: groups.flat() };
 }
 
@@ -82,6 +85,10 @@ export async function ingestOpportunities(profile: UserProfile) {
     if (result.status === "fulfilled") { events.push(...result.value.events); sources.push({ name: job.name, count: result.value.events.length, status: "complete" }); ledger.push({ id: `source-${index}`, kind: "source", status: "complete", title: job.name, detail: `${result.value.events.length} event${result.value.events.length === 1 ? "" : "s"} normalized.`, at: "just now", duration: `${((Date.now() - started) / 1000).toFixed(1)}s` }); ledger.push(...(result.value.ledger ?? [])); discovery ??= result.value.discovery; return; }
     sources.push({ name: job.name, count: 0, status: "attention" }); ledger.push({ id: `source-${index}`, kind: "source", status: "attention", title: job.name, detail: result.reason instanceof Error ? result.reason.message : "The source could not be reached.", at: "just now" });
   });
-  const deduped = deduplicate(events); ledger.push({ id: "dedup", kind: "dedup", status: "complete", title: "Deterministic deduplication", detail: deduped.decisions.length ? deduped.decisions.join(" ") : "No duplicate candidates crossed the auto-merge threshold.", at: "just now", duration: "<0.1s" });
+  const verifiedEvents = await verifyEventLocations(events, profile);
+  const eligibleEvents = verifiedEvents.filter((event) => isEligibleForProfile(event, profile));
+  const physicalCandidates = events.filter((event) => event.format !== "online").length;
+  if (physicalCandidates) ledger.push({ id: "location-verification", kind: "system", status: "complete", title: "Locality verified", detail: `${eligibleEvents.filter((event) => event.format !== "online").length} of ${physicalCandidates} physical opportunities have verified coordinates inside your travel area.`, at: "just now" });
+  const deduped = deduplicate(eligibleEvents); ledger.push({ id: "dedup", kind: "dedup", status: "complete", title: "Deterministic deduplication", detail: deduped.decisions.length ? deduped.decisions.join(" ") : "No duplicate candidates crossed the auto-merge threshold.", at: "just now", duration: "<0.1s" });
   return { events: deduped.events, sources, ledger, discovery };
 }

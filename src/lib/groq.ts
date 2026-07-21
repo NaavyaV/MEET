@@ -162,8 +162,8 @@ export type GroqExtractedEvent = {
 export async function extractEventsWithGroq(page: { url: string; title: string; text: string }) {
   const result = await jsonCompletion<{ events: GroqExtractedEvent[] }>(
     "Extract only concrete future events from this public, permitted page. Every returned field must be explicitly supported by page text. Source URL must be the page URL. Reject anything without a title, a future date, and short supporting evidence snippets. Do not infer a date, location, organizer, URL, format, or confidence.",
-    `URL: ${page.url}\nPage title: ${page.title}\nCleaned page text:\n${page.text.slice(0, 9000)}\n\nSchema: {"events":[{"title":string,"description":string,"startsAt":string,"endsAt":string|null,"timezone":string|null,"sourceUrl":string,"registrationUrl":string|null,"organizer":string|null,"format":"online"|"in-person"|"hybrid","venue":string|null,"address":string|null,"latitude":number|null,"longitude":number|null,"category":string|null,"tags":string[],"extractionConfidence":number,"evidence":string[]}]}`,
-    550,
+    `URL: ${page.url}\nPage title: ${page.title}\nCleaned page text:\n${page.text.slice(0, 5000)}\n\nSchema: {"events":[{"title":string,"description":string,"startsAt":string,"endsAt":string|null,"timezone":string|null,"sourceUrl":string,"registrationUrl":string|null,"organizer":string|null,"format":"online"|"in-person"|"hybrid","venue":string|null,"address":string|null,"latitude":number|null,"longitude":number|null,"category":string|null,"tags":string[],"extractionConfidence":number,"evidence":string[]}]}`,
+    900,
   );
   return result?.events ?? [];
 }
@@ -171,7 +171,8 @@ export async function extractEventsWithGroq(page: { url: string; title: string; 
 export async function getRelevanceScores(events: Opportunity[], profile: UserProfile) {
   const result = await jsonCompletion<{ scores: { id: string; score: number; reason?: string }[] }>(
     "Judge semantic relevance only, on a 0–10 scale. Use the profile's stated goals, interests, and skills. Do not account for time, format, distance, popularity, or date. A score of 10 means unusually direct alignment.",
-    `Profile:\n${JSON.stringify({ skills: profile.skills, interests: profile.interests, goals: profile.goals, careerStage: profile.careerStage })}\n\nEvents:\n${JSON.stringify(events.map(({ id, title, description, tags, category }) => ({ id, title, description, tags, category })))}\n\nSchema: {"scores":[{"id":string,"score":number,"reason":string}]}`,
+    `Profile:\n${JSON.stringify({ skills: profile.skills, interests: profile.interests, goals: profile.goals, careerStage: profile.careerStage })}\n\nEvents:\n${JSON.stringify(events.map(({ id, title, description, tags, category }) => ({ id, title, description: description.slice(0, 220), tags, category })))}\n\nSchema: {"scores":[{"id":string,"score":number,"reason":string}]}`,
+    300,
   );
   const valid = (result?.scores ?? []).filter((item) => typeof item.id === "string" && Number.isFinite(item.score));
   return {

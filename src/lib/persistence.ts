@@ -8,11 +8,34 @@ const durationMilliseconds = (duration?: string) => {
 };
 const sourceDomain = (event: Opportunity) => event.provenance?.sourceDomain ?? (() => { try { return new URL(event.url).hostname; } catch { return null; } })();
 
-export async function authenticatedUserId(authorization: string | null) {
+export async function authenticatedUser(authorization: string | null) {
   const token = authorization?.replace(/^Bearer\s+/i, ""); const admin = createSupabaseAdminClient();
   if (!token || !admin) return null;
   const { data, error } = await admin.auth.getUser(token);
-  return error ? null : data.user?.id ?? null;
+  return error ? null : data.user ?? null;
+}
+
+export async function authenticatedUserId(authorization: string | null) {
+  return (await authenticatedUser(authorization))?.id ?? null;
+}
+
+export type RefreshQuota = {
+  allowed: boolean;
+  unlimited: boolean;
+  refreshes_remaining: number | null;
+  groq_tokens_remaining: number | null;
+  reset_at: string;
+};
+
+/** Reserve a full bounded refresh before any paid/limited API calls begin. */
+export async function reserveRefreshQuota(user: { id: string; email?: string | null }) {
+  const admin = createSupabaseAdminClient();
+  if (!admin) return null;
+  const { data, error } = await admin.rpc("reserve_refresh_quota", { p_user_id: user.id, p_email: user.email ?? "", p_estimated_groq_tokens: 7500 });
+  if (error) throw error;
+  const quota = (data as RefreshQuota[] | null)?.[0];
+  if (!quota) throw new Error("Refresh quota could not be reserved.");
+  return quota;
 }
 
 export async function persistRefresh(userId: string, profile: UserProfile, events: Opportunity[], ledger: LedgerEntry[], sources: unknown, discovery?: DiscoveryDiagnostics) {

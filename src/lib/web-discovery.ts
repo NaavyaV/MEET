@@ -52,7 +52,7 @@ export function getWebDiscoveryConfig(env: Partial<NodeJS.ProcessEnv> = process.
   return {
     enabled: env.WEB_DISCOVERY_ENABLED === "true",
     maxQueries: numberSetting(env.WEB_DISCOVERY_MAX_QUERIES, 4, 6),
-    maxResults: numberSetting(env.WEB_DISCOVERY_MAX_RESULTS, 24, 30),
+    maxResults: numberSetting(env.WEB_DISCOVERY_MAX_RESULTS, 48, 48),
     maxFetches: numberSetting(env.WEB_DISCOVERY_MAX_FETCHES, 8, 15),
     maxPagesPerDomain: numberSetting(env.WEB_DISCOVERY_MAX_PAGES_PER_DOMAIN, 1, 2),
     allowedRegions: split(env.WEB_DISCOVERY_ALLOWED_REGIONS),
@@ -97,7 +97,7 @@ export function buildDiscoveryQueries(profile: UserProfile, config: Pick<WebDisc
   const dateWindow = `${month} or ${followingMonth}`;
   const city = profile.location.split(",")[0]?.trim() || profile.location;
   const metro = /^(mckinney|plano|frisco|allen|dallas|fort worth|arlington|richardson)$/i.test(city) ? "Dallas Fort Worth" : city;
-  const location = profile.formatPreference === "online" ? "online" : `${city} ${metro}`.trim();
+  const location = profile.formatPreference === "online" ? "online" : city.toLowerCase() === metro.toLowerCase() ? city : `${city} ${metro}`.trim();
   const topic = [...profile.interests, ...profile.skills].filter(Boolean).slice(0, 3).join(" ") || "technology";
   const goalWords = profile.goals.split(/[^a-zA-Z0-9]+/).filter((word) => word.length > 4).slice(0, 3).join(" ");
   const formatHint = profile.formatPreference === "online" ? "online virtual" : profile.formatPreference === "in-person" ? "in person" : "upcoming";
@@ -124,7 +124,7 @@ export function selectCandidates(results: Array<SearchResult & { query: string }
     const candidate: DiscoveryCandidate = { url: result.url, normalizedUrl: normalizedUrl ?? result.url, domain, title: result.title, publishedDate: result.publishedDate, highlights: result.highlights, query: result.query, decision: "skipped", reason: reason ?? undefined };
     if (reason) { candidates.push(candidate); continue; }
     if (seen.has(normalizedUrl!)) { candidate.reason = "Duplicate normalized URL."; candidates.push(candidate); continue; }
-    if (selected.length >= config.maxFetches) { candidate.reason = `Total fetch budget (${config.maxFetches}) reached.`; candidates.push(candidate); continue; }
+    if (selected.length >= config.maxFetches * 3) { candidate.reason = `Candidate screening budget (${config.maxFetches * 3}) reached.`; candidates.push(candidate); continue; }
     if ((perDomain.get(domain) ?? 0) >= config.maxPagesPerDomain) { candidate.reason = `Per-domain budget (${config.maxPagesPerDomain}) reached.`; candidates.push(candidate); continue; }
     seen.add(normalizedUrl!); perDomain.set(domain, (perDomain.get(domain) ?? 0) + 1); candidate.decision = "selected"; candidate.reason = undefined;
     selected.push(candidate); candidates.push(candidate);
@@ -198,6 +198,20 @@ const cleanHtml = (value: string) => value.replace(/<script[^>]*>[\s\S]*?<\/scri
 const titleFromHtml = (value: string) => cleanHtml(value.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1] ?? "Event page");
 const stableId = (value: string) => { let hash = 5381; for (const char of value) hash = ((hash << 5) + hash) ^ char.charCodeAt(0); return (hash >>> 0).toString(36); };
 const validDate = (value: string | undefined) => Boolean(value && !Number.isNaN(Date.parse(value)));
+const streetAddressFromPage = (html: string) => cleanHtml(html).match(/\b\d{1,5}\s+[A-Za-z0-9 .'-]+(?:,\s*(?:suite|ste|unit|floor|fl|room|rm)\.?\s*[A-Za-z0-9-]+)?\s*,\s*[A-Za-z .'-]+,\s*[A-Z]{2}\s+\d{5}(?:-\d{4})?\b/i)?.[0];
+
+/** Give compact extraction a current/future section of a long calendar page. */
+export function upcomingEventText(value: string, now = new Date()) {
+  const text = cleanHtml(value);
+  const futureDateLabels = Array.from({ length: UPCOMING_EVENT_WINDOW_DAYS + 1 }, (_, offset) => {
+    const date = new Date(now.getFullYear(), now.getMonth(), now.getDate() + offset);
+    const month = new Intl.DateTimeFormat("en-US", { month: "long" }).format(date);
+    return [`${month} ${date.getDate()}`, `${date.getDate()} ${month}`];
+  }).flat();
+  const lower = text.toLowerCase();
+  const start = futureDateLabels.map((label) => lower.indexOf(label.toLowerCase())).filter((index) => index >= 0).sort((a, b) => a - b)[0];
+  return text.slice(start ?? 0, (start ?? 0) + 5_000);
+}
 
 function eventFormat(input: unknown, hint = ""): EventFormat {
   const value = `${typeof input === "string" ? input : ""} ${hint}`.toLowerCase();
@@ -215,6 +229,7 @@ function eventNodes(value: unknown): Record<string, unknown>[] {
   return [...(isEvent ? [record] : []), ...Object.values(record).flatMap(eventNodes)];
 }
 function locationFromSchema(location: unknown) {
+  if (typeof location === "string" && location.trim()) return { venue: location.trim(), address: location.trim() };
   if (!location || typeof location !== "object") return {};
   const entry = location as Record<string, unknown>;
   const address = typeof entry.address === "object" && entry.address ? Object.values(entry.address as Record<string, unknown>).filter((item): item is string => typeof item === "string").join(", ") : stringValue(entry.address);
@@ -256,8 +271,9 @@ export function validateExtractedEvent(input: ExtractedCandidate, sourceUrl: str
     if (profile.formatPreference === "in-person") return { event: null, reason: "Rejected extraction: profile is in-person-only." };
   } else {
     if (profile.formatPreference === "online") return { event: null, reason: "Rejected extraction: profile is online-only." };
-    if (!hasProfileCoordinates || distanceMiles == null) return { event: null, reason: "Rejected extraction: an in-person event needs coordinates to verify your travel area." };
-    if (distanceMiles > profile.travelRadius) return { event: null, reason: `Rejected extraction: ${distanceMiles.toFixed(1)} miles is outside your ${profile.travelRadius}-mile travel area.` };
+    // Address-only candidates are retained briefly so the bounded server-side
+    // geocoder can verify them. Ingestion applies the final hard radius gate.
+    if (distanceMiles != null && distanceMiles > profile.travelRadius) return { event: null, reason: `Rejected extraction: ${distanceMiles.toFixed(1)} miles is outside your ${profile.travelRadius}-mile travel area.` };
   }
   const address = input.address?.toLowerCase() ?? "";
   if (format !== "online" && address && allowedRegions.length && !allowedRegions.some((region) => address.includes(region.toLowerCase()))) return { event: null, reason: "Rejected extraction: known address is outside WEB_DISCOVERY_ALLOWED_REGIONS." };
@@ -277,6 +293,7 @@ export function validateExtractedEvent(input: ExtractedCandidate, sourceUrl: str
 
 function extractStructuredEvents(html: string, sourceUrl: string, profile: UserProfile, allowedRegions: string[] = []) {
   const scripts = [...html.matchAll(/<script[^>]+type=["']application\/ld\+json[^"']*["'][^>]*>([\s\S]*?)<\/script>/gi)].map((match) => match[1]);
+  const pageAddress = streetAddressFromPage(html);
   const events: Opportunity[] = []; const rejected: string[] = [];
   for (const script of scripts) {
     try {
@@ -285,7 +302,7 @@ function extractStructuredEvents(html: string, sourceUrl: string, profile: UserP
         const validated = validateExtractedEvent({
           title: stringValue(node.name), description: stringValue(node.description), startsAt: stringValue(node.startDate), endsAt: stringValue(node.endDate) || undefined,
           source: stringValue(organizer?.name) || undefined, sourceUrl, registrationUrl: stringValue(node.url) || undefined, format: eventFormat(node.eventAttendanceMode, `${stringValue(node.location)} ${stringValue(node.description)}`),
-          venue: location.venue, address: location.address, latitude: location.latitude, longitude: location.longitude, category: stringValue(node.eventCategory) || "Event", tags: stringArray(node.keywords), extractionConfidence: 0.98,
+          venue: location.venue, address: location.address || pageAddress, latitude: location.latitude, longitude: location.longitude, category: stringValue(node.eventCategory) || "Event", tags: stringArray(node.keywords), extractionConfidence: 0.98,
           evidence: [`JSON-LD Event: ${stringValue(node.name)}; starts ${stringValue(node.startDate)}`], provenance: { extractionMethod: "structured", sourceDomain: domainOf(sourceUrl), sourceUrl, evidence: [] },
         }, sourceUrl, profile, new Date(), allowedRegions);
         if (validated.event) events.push(validated.event); else if (validated.reason) rejected.push(validated.reason);
@@ -351,7 +368,9 @@ export function toProvenanceRecord(event: Opportunity) {
 export type WebDiscoveryResult = { events: Opportunity[]; ledger: LedgerEntry[]; diagnostics: DiscoveryDiagnostics };
 
 export async function runWebDiscovery(profile: UserProfile, provider: WebSearchProvider = new ExaSearchProvider(process.env.EXA_API_KEY || ""), config = getWebDiscoveryConfig()): Promise<WebDiscoveryResult> {
-  config = { ...config, maxQueries: Math.min(config.maxQueries, 4), maxResults: Math.min(config.maxResults, 24), maxFetches: Math.min(config.maxFetches, 8), maxPagesPerDomain: 1 };
+  // Wider public-web coverage is still bounded: it samples multiple official
+  // organizers without repeatedly hitting any one domain.
+  config = { ...config, maxQueries: Math.min(config.maxQueries, 6), maxResults: Math.min(config.maxResults, 48), maxFetches: Math.min(config.maxFetches, 15), maxPagesPerDomain: Math.min(config.maxPagesPerDomain, 2) };
   const diagnostics: DiscoveryDiagnostics = { enabled: config.enabled, queries: [], candidates: [], fetched: 0, structuredExtractions: 0, llmExtractions: 0, rejectedEvents: [] };
   const ledger: LedgerEntry[] = [];
   if (!config.enabled) return { events: [], diagnostics, ledger: [{ id: "web-disabled", kind: "source", status: "skipped", title: "Web discovery", detail: "Disabled by WEB_DISCOVERY_ENABLED.", at: "just now" }] };
@@ -375,12 +394,18 @@ export async function runWebDiscovery(profile: UserProfile, provider: WebSearchP
   resultSets.forEach((result, index) => { if (result.status === "fulfilled") rawResults.push(...result.value.results.map((candidate) => ({ ...candidate, query: result.value.query }))); else ledger.push({ id: `web-search-error-${index}`, kind: "source", status: "attention", title: "Web discovery search failed", detail: result.reason instanceof Error ? result.reason.message : "Search provider request failed.", at: "just now" }); });
   const { selected, candidates } = selectCandidates(rawResults, config);
   diagnostics.candidates = candidates;
-  ledger.push({ id: "web-candidates", kind: "source", status: "complete", title: "Web candidates screened", detail: `${rawResults.length} results screened; ${selected.length} compliant public pages selected for event extraction.`, at: "just now" });
+  ledger.push({ id: "web-candidates", kind: "source", status: "complete", title: "Web candidates screened", detail: `${rawResults.length} results screened; ${selected.length} compliant public pages queued so robots-safe fallbacks can fill the fetch budget.`, at: "just now" });
   const robotsCache = new Map<string, RobotsDecision>(); const limiter = new DomainRateLimiter(); const events: Opportunity[] = [];
   let groqExtractionPages = 0;
-  await Promise.allSettled(selected.map(async (candidate) => {
-    const robot = await robotsDecision(candidate.normalizedUrl, config.userAgent, robotsCache);
-    if (robot.decision !== "allowed") { candidate.decision = "robots-disallowed"; candidate.reason = robot.reason; return; }
+  const robotChecks = await Promise.all(selected.map(async (candidate) => ({ candidate, robot: await robotsDecision(candidate.normalizedUrl, config.userAgent, robotsCache) })));
+  const allowedCandidates = robotChecks.flatMap(({ candidate, robot }) => {
+    if (robot.decision === "allowed") return [candidate];
+    candidate.decision = "robots-disallowed"; candidate.reason = robot.reason;
+    return [];
+  });
+  const candidatesToFetch = allowedCandidates.slice(0, config.maxFetches);
+  allowedCandidates.slice(config.maxFetches).forEach((candidate) => { candidate.decision = "skipped"; candidate.reason = `Total fetch budget (${config.maxFetches}) reached after robots checks.`; });
+  await Promise.allSettled(candidatesToFetch.map(async (candidate) => {
     try {
       const page = await fetchPage(candidate.normalizedUrl, config.userAgent, limiter); diagnostics.fetched += 1; candidate.normalizedUrl = page.url; candidate.decision = "fetched"; candidate.reason = "Fetched after URL, budget, and robots checks.";
       const jsonLd = extractStructuredEvents(page.text, page.url, profile, config.allowedRegions);
@@ -392,10 +417,10 @@ export async function runWebDiscovery(profile: UserProfile, provider: WebSearchP
         structured.events.forEach((event) => { if (event.provenance) { event.provenance.discoveryQuery = candidate.query; event.provenance.robotsDecision = "allowed"; } });
         diagnostics.structuredExtractions += structured.events.length; events.push(...structured.events);
         ledger.push({ id: `web-structured-${stableId(page.url)}`, kind: "source", status: "complete", title: `Structured event data · ${candidate.domain}`, detail: `${structured.events.length} JSON-LD, feed, ICS, or Open Graph event extraction${structured.events.length === 1 ? "" : "s"} from ${page.url}.`, at: "just now" });
-      } else if (groqConfigured() && groqExtractionPages < 2) {
+      } else if (groqConfigured() && groqExtractionPages < 1) {
         groqExtractionPages += 1;
         try {
-          const extracted = await extractEventsWithGroq({ url: page.url, title: titleFromHtml(page.text), text: cleanHtml(page.text) });
+          const extracted = await extractEventsWithGroq({ url: page.url, title: titleFromHtml(page.text), text: upcomingEventText(page.text) });
           const validated = extracted.map((item) => validateExtractedEvent({ ...item, source: item.organizer ?? undefined, sourceUrl: page.url, provenance: { extractionMethod: "llm", sourceDomain: domainOf(page.url), sourceUrl: page.url, evidence: [], robotsDecision: "allowed" } }, page.url, profile, new Date(), config.allowedRegions));
           const usable = validated.flatMap((item) => item.event ? [item.event] : []);
           validated.forEach((item) => { if (item.reason) diagnostics.rejectedEvents.push(item.reason); });
