@@ -27,11 +27,11 @@ MEET uses Groq’s `llama-3.1-8b-instant`, the current lowest-cost production te
 | Open-web query diversification | Optional Groq | Improves the bounded deterministic query set; never required. |
 | Relevance score | Groq | Semantic fit needs a judgment against the person’s goals. |
 | Duplicate matching | Deterministic code | Token overlap + same date; transparent and instant. |
-| Distance / format / timing / final score | Deterministic code | Plain mathematics and user-controlled weights. |
-| “Why not?” explanation | Deterministic code | A template based on the actual lowest score, never invented. |
+| Travel-area gate, distance, and final score | Deterministic code | Physical events require verified coordinates inside the user's selected radius; ranking is 70% relevance and 30% proximity. |
+| “Why lower?” explanation | Deterministic code | A template based on relevance or verified proximity, never invented. |
 | Feedback reweighting | Deterministic code | Based on explicit saved, dismissed, and going actions. |
 
-MEET uses Groq privately for semantic matching when it is configured, but the interface keeps the result simple: it shows the event distance and a short plain-language explanation based on the member’s stated goals, interests, schedule, and format preferences.
+MEET uses Groq privately for semantic matching when it is configured, but the interface keeps the result simple: it shows the event distance and a short plain-language explanation based on the member’s stated goals, interests, and verified proximity.
 
 ## Local setup
 
@@ -108,7 +108,7 @@ Web discovery fills gaps after structured calendars; it does not replace RSS/ICS
 3. MEET normalizes URLs; removes tracking IDs and duplicates; blocks login-dependent social sites, checkout, private-profile, generic-search, Eventbrite, and known event aggregators; then enforces the configured cap (at most eight pages total and one page per domain).
 4. Before every fetch it checks `robots.txt`. A denied or unavailable robots rule is a skip, never a bypass. Fetches are server-side, rate-limited per domain, time-bounded, and retried with small backoff.
 5. MEET prefers JSON-LD Event, RSS/Atom, ICS, and Open Graph-style public metadata. Only when structured Event data is absent does it pass cleaned public page text to Groq.
-6. An extraction is rejected unless it has a title, a date in the next 62 days, a valid original source URL, and page evidence. Clear irrelevance and duplicates are removed; distance and format affect the rank instead of hiding an otherwise valid event.
+6. An extraction is rejected unless it has a title, a date in the next 62 days, a valid original source URL, and page evidence. Physical events also need coordinates inside the member's travel area; clear irrelevance and duplicates are removed before the relevance-and-proximity ranking.
 
 The event detail provenance panel distinguishes **Web-discovered**, **Structured source**, **LLM-reasoned**, and **Computed**. The Trust Ledger intentionally shows completed discovery, extraction, deduplication, and ranking work; operational skips and failures stay out of the member-facing view.
 

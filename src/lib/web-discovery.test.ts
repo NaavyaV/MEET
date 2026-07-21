@@ -51,7 +51,7 @@ describe("web discovery decisions", () => {
 
   it("rejects unsupported extraction and accepts evidence-backed future events", () => {
     expect(validateExtractedEvent({ title: "Missing date", evidence: ["An event"] }, "https://example.edu/events", defaultProfile).event).toBeNull();
-    const valid = validateExtractedEvent({ title: "AI workshop", description: "Build with AI", startsAt: future, sourceUrl: "https://example.edu/events/ai", format: "in-person", category: "Workshop", tags: ["AI"], extractionConfidence: 0.9, evidence: ["AI workshop on the event page"], provenance: { extractionMethod: "structured" } }, "https://example.edu/events/ai", defaultProfile);
+    const valid = validateExtractedEvent({ title: "AI workshop", description: "Build with AI", startsAt: future, sourceUrl: "https://example.edu/events/ai", format: "in-person", latitude: 41.88, longitude: -87.63, category: "Workshop", tags: ["AI"], extractionConfidence: 0.9, evidence: ["AI workshop on the event page"], provenance: { extractionMethod: "structured" } }, "https://example.edu/events/ai", defaultProfile);
     expect(valid.event?.provenance?.evidence).toEqual(["AI workshop on the event page"]);
     expect(valid.event?.sourceType).toBe("web-discovery");
   });
@@ -64,10 +64,11 @@ describe("web discovery decisions", () => {
     expect(result.reason).toContain("more than 62 days away");
   });
 
-  it("keeps a valid event beyond the usual travel radius so ranking can explain the tradeoff", () => {
+  it("rejects a physical event outside the selected travel radius", () => {
     const profile = { ...defaultProfile, travelRadius: 5, latitude: 41.8781, longitude: -87.6298 };
     const result = validateExtractedEvent({ title: "Regional AI workshop", startsAt: future, sourceUrl: "https://example.edu/events/regional-ai", format: "in-person", latitude: 42.3314, longitude: -83.0458, category: "Workshop", tags: ["AI"], extractionConfidence: 0.9, evidence: ["Regional AI workshop on the event page"], provenance: { extractionMethod: "structured" } }, "https://example.edu/events/regional-ai", profile);
-    expect(result.event?.distanceMiles).toBeGreaterThan(profile.travelRadius);
+    expect(result.event).toBeNull();
+    expect(result.reason).toContain("outside your 5-mile travel area");
   });
 
   it("projects source provenance without raw page text", () => {

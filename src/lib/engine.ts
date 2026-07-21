@@ -11,21 +11,25 @@ export function relevanceFallback(event: Opportunity, profile: UserProfile) {
   return scoreWords(`${event.title} ${event.description} ${event.tags.join(" ")}`, [...profile.skills, ...profile.interests, ...profile.goals.split(/\W+/)]);
 }
 
+/** Physical events must have a verified distance inside the chosen area. */
+export function isEligibleForProfile(event: Pick<Opportunity, "format" | "distanceMiles">, profile: UserProfile) {
+  if (event.format === "online") return profile.formatPreference !== "in-person";
+  if (profile.formatPreference === "online") return false;
+  return Number.isFinite(event.distanceMiles) && (event.distanceMiles as number) <= profile.travelRadius;
+}
+
 export function buildLowScoreExplanation(event: Opportunity, scores: Pick<ScoreBreakdown, ScoreFactor>, profile: UserProfile) {
-  const factors = Object.entries(scores) as [ScoreFactor, number][];
-  const [factor] = factors.sort((a, b) => a[1] - b[1])[0];
+  const factor = scores.relevance <= scores.distance ? "relevance" : "distance";
   if (factor === "distance") {
-    const distance = event.distanceMiles == null ? "an unconfirmed distance" : `${event.distanceMiles.toFixed(1)} miles`;
-    return `Distance is the main constraint: this is ${distance} away, compared with your ${profile.travelRadius}-mile preference.`;
+    return event.format === "online"
+      ? "Relevance is the main constraint: this online opportunity overlaps less with your stated goals and interests."
+      : `Location is the main constraint: this is ${event.distanceMiles?.toFixed(1)} miles away within your ${profile.travelRadius}-mile travel area.`;
   }
-  if (factor === "format") return `Format fit is the main constraint: you prefer ${profile.formatPreference === "both" ? "a balanced mix" : profile.formatPreference} events, while this one is ${event.format}.`;
-  if (factor === "timing") return `Timing is the main constraint: this ${new Date(event.startsAt).toLocaleDateString("en-US", { weekday: "long" })} event is less aligned with your ${profile.availability} availability.`;
-  if (factor === "relevance") return `Relevance is the main constraint: its topics overlap less with your stated skills, interests, and current goal.`;
-  return `Scale and caliber are the main constraint: the available description has fewer signals such as mentors, structured projects, or a competitive format.`;
+  return "Relevance is the main constraint: its topics overlap less with your stated skills, interests, and current goal.";
 }
 
 export function scoreOpportunity(event: Opportunity, profile: UserProfile, relevance?: number, relevanceReason?: string): Opportunity {
-  const distance = event.format === "online" ? 10 : event.distanceMiles == null ? 5 : Math.max(0, 10 * (1 - Math.max(0, event.distanceMiles - 1) / Math.max(1, profile.travelRadius * 1.4)));
+  const distance = event.format === "online" ? 10 : event.distanceMiles == null ? 0 : Math.max(0, 10 * (1 - Math.max(0, event.distanceMiles - 1) / Math.max(1, profile.travelRadius)));
   const format = profile.formatPreference === "both" || event.format === "hybrid" || event.format === profile.formatPreference ? 10 : 2.5;
   const start = new Date(event.startsAt);
   const hour = start.getHours();
@@ -42,8 +46,9 @@ export function scoreOpportunity(event: Opportunity, profile: UserProfile, relev
     timing: Math.round(timing * 10) / 10,
     caliber,
   };
-  const totalWeight = Object.values(profile.weights).reduce((total, weight) => total + weight, 0);
-  const final = (Object.entries(subScores) as [keyof typeof subScores, number][]).reduce((total, [key, value]) => total + value * profile.weights[key], 0) / totalWeight;
+  // Format and timing remain stored as descriptive metadata, but cannot move
+  // one nearby event above another in the feed.
+  const final = subScores.relevance * 0.7 + subScores.distance * 0.3;
   return {
     ...event,
     score: {
@@ -51,7 +56,7 @@ export function scoreOpportunity(event: Opportunity, profile: UserProfile, relev
       final: Math.round(final * 10) / 10,
       reasons: {
         relevance: relevanceReason ?? "Semantic overlap between your profile and the event content.",
-        distance: event.format === "online" ? "Online events receive a full distance score." : `${event.distanceMiles?.toFixed(1) ?? "Unknown"} miles against your ${profile.travelRadius}-mile radius.`,
+        distance: event.format === "online" ? "Online event; no travel is required." : `${event.distanceMiles?.toFixed(1) ?? "Verified"} miles within your ${profile.travelRadius}-mile radius.`,
         format: `${event.format} event compared with your ${profile.formatPreference} preference.`,
         timing: `${start.toLocaleDateString("en-US", { weekday: "long" })} at ${start.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" })}, evaluated against your ${profile.availability} availability.`,
         caliber: event.caliberReason ?? "Caliber is inferred once from format and organizer signals, then cached.",

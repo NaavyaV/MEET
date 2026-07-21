@@ -252,9 +252,13 @@ export function validateExtractedEvent(input: ExtractedCandidate, sourceUrl: str
   const format = input.format ?? eventFormat(`${input.venue ?? ""} ${input.address ?? ""} ${input.description ?? ""}`);
   const hasProfileCoordinates = Number.isFinite(profile.latitude) && Number.isFinite(profile.longitude) && (Math.abs(profile.latitude) > 0.001 || Math.abs(profile.longitude) > 0.001);
   const distanceMiles = hasProfileCoordinates && latitude != null && longitude != null ? haversineMiles(profile.latitude, profile.longitude, latitude, longitude) : null;
-  // Distance affects ranking rather than eligibility. A person can still choose
-  // a worthwhile event beyond their usual travel preference.
-  if (profile.formatPreference === "online" && format === "in-person") return { event: null, reason: "Rejected extraction: profile is online-only." };
+  if (format === "online") {
+    if (profile.formatPreference === "in-person") return { event: null, reason: "Rejected extraction: profile is in-person-only." };
+  } else {
+    if (profile.formatPreference === "online") return { event: null, reason: "Rejected extraction: profile is online-only." };
+    if (!hasProfileCoordinates || distanceMiles == null) return { event: null, reason: "Rejected extraction: an in-person event needs coordinates to verify your travel area." };
+    if (distanceMiles > profile.travelRadius) return { event: null, reason: `Rejected extraction: ${distanceMiles.toFixed(1)} miles is outside your ${profile.travelRadius}-mile travel area.` };
+  }
   const address = input.address?.toLowerCase() ?? "";
   if (format !== "online" && address && allowedRegions.length && !allowedRegions.some((region) => address.includes(region.toLowerCase()))) return { event: null, reason: "Rejected extraction: known address is outside WEB_DISCOVERY_ALLOWED_REGIONS." };
   const titleAndCategory = `${input.title} ${input.category ?? ""} ${sourceDomain}`;

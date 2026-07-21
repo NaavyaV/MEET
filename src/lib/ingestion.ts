@@ -1,4 +1,4 @@
-import { deduplicate } from "./engine";
+import { deduplicate, isEligibleForProfile } from "./engine";
 import { isWithinUpcomingEventWindow } from "./event-window";
 import { extractEventsWithGroq, groqConfigured } from "./groq";
 import { haversineMiles, validateExtractedEvent, getWebDiscoveryConfig, robotsDecision, runWebDiscovery, WebDiscoveryResult } from "./web-discovery";
@@ -30,7 +30,8 @@ export function parseIcs(ics: string, sourceUrl: string, now = new Date(), profi
     const title = icsField(block, "SUMMARY"); const start = parseIcsDate(icsField(block, "DTSTART")); const end = parseIcsDate(icsField(block, "DTEND")); const location = icsField(block, "LOCATION"); const description = icsField(block, "DESCRIPTION"); const url = icsField(block, "URL") || sourceUrl;
     const [latitudeText, longitudeText] = icsField(block, "GEO").split(/[;,]/); const latitude = finiteCoordinate(latitudeText); const longitude = finiteCoordinate(longitudeText); const format = inferFormat(`${location} ${description}`); const distanceMiles = locationDistance(profile, latitude, longitude);
     if (!title || !start || !isWithinUpcomingEventWindow(start, now)) return [];
-    return [{ id: `ics-${slug(title)}-${start.getTime()}-${index}`, title, source: sourceDomain, sourceType: "rss", url, description, startsAt: start.toISOString(), endsAt: end?.toISOString(), format, venue: location || undefined, latitude, longitude, distanceMiles, category: "Calendar event", tags: [], provenance: { sourceDomain, sourceUrl, extractionMethod: "rss", extractionConfidence: 1, evidence: [`ICS VEVENT: ${title}; DTSTART ${icsField(block, "DTSTART")}`] } }];
+    const event: Opportunity = { id: `ics-${slug(title)}-${start.getTime()}-${index}`, title, source: sourceDomain, sourceType: "rss", url, description, startsAt: start.toISOString(), endsAt: end?.toISOString(), format, venue: location || undefined, latitude, longitude, distanceMiles, category: "Calendar event", tags: [], provenance: { sourceDomain, sourceUrl, extractionMethod: "rss", extractionConfidence: 1, evidence: [`ICS VEVENT: ${title}; DTSTART ${icsField(block, "DTSTART")}`] } };
+    return !profile || isEligibleForProfile(event, profile) ? [event] : [];
   });
 }
 
@@ -42,7 +43,8 @@ export function parseRss(xml: string, sourceUrl: string, now = new Date(), profi
     const start = startsAt ? new Date(startsAt) : eventDateInText(`${title} ${description}`) ?? new Date(textIn(entry, "pubDate") || textIn(entry, "updated") || textIn(entry, "published"));
     const latitude = finiteCoordinate(textIn(entry, "geo:lat") || textIn(entry, "latitude")); const longitude = finiteCoordinate(textIn(entry, "geo:long") || textIn(entry, "longitude")); const format = inferFormat(`${title} ${description}`); const distanceMiles = locationDistance(profile, latitude, longitude);
     if (!title || !start || !isWithinUpcomingEventWindow(start, now)) return [];
-    return [{ id: `rss-${slug(title)}-${index}`, title, source: "Community RSS feed", sourceType: "rss", url: link, description: description || "", startsAt: start.toISOString(), format, latitude, longitude, distanceMiles, category: "Community event", tags: [], provenance: { sourceDomain: new URL(sourceUrl).hostname, sourceUrl, extractionMethod: "rss", extractionConfidence: 1, evidence: [`RSS/Atom item: ${title}; event date ${start.toISOString()}`] } }];
+    const event: Opportunity = { id: `rss-${slug(title)}-${index}`, title, source: "Community RSS feed", sourceType: "rss", url: link, description: description || "", startsAt: start.toISOString(), format, latitude, longitude, distanceMiles, category: "Community event", tags: [], provenance: { sourceDomain: new URL(sourceUrl).hostname, sourceUrl, extractionMethod: "rss", extractionConfidence: 1, evidence: [`RSS/Atom item: ${title}; event date ${start.toISOString()}`] } };
+    return !profile || isEligibleForProfile(event, profile) ? [event] : [];
   });
 }
 

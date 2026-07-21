@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { defaultProfile } from "./demo-data";
 import { parseIcs, parseRss } from "./ingestion";
 
 const now = new Date("2026-07-21T12:00:00Z");
@@ -42,5 +43,28 @@ END:VEVENT
 END:VCALENDAR`;
 
     expect(parseIcs(ics, sourceUrl, now).map((event) => event.title)).toEqual(["In window"]);
+  });
+
+  it("keeps physical RSS and ICS events only when verified inside the travel area", () => {
+    const profile = { ...defaultProfile, travelRadius: 5 };
+    const rss = `<rss><channel><item><title>Nearby RSS event</title><pubDate>${new Date(now.getTime() + 2 * 86_400_000).toUTCString()}</pubDate><geo:lat>41.88</geo:lat><geo:long>-87.63</geo:long></item><item><title>Far RSS event</title><pubDate>${new Date(now.getTime() + 3 * 86_400_000).toUTCString()}</pubDate><geo:lat>42.3314</geo:lat><geo:long>-83.0458</geo:long></item></channel></rss>`;
+    const ics = `BEGIN:VCALENDAR
+BEGIN:VEVENT
+SUMMARY:Nearby ICS event
+DTSTART:20260723T090000Z
+GEO:41.88;-87.63
+END:VEVENT
+BEGIN:VEVENT
+SUMMARY:Far ICS event
+DTSTART:20260724T090000Z
+GEO:42.3314;-83.0458
+END:VEVENT
+END:VCALENDAR`;
+
+    const parsedIcs = parseIcs(ics, sourceUrl, now);
+    expect(parsedIcs).toHaveLength(2);
+    expect(parsedIcs[0]).toMatchObject({ latitude: 41.88, longitude: -87.63 });
+    expect(parseRss(rss, sourceUrl, now, profile).map((event) => event.title)).toEqual(["Nearby RSS event"]);
+    expect(parseIcs(ics, sourceUrl, now, profile).map((event) => event.title)).toEqual(["Nearby ICS event"]);
   });
 });

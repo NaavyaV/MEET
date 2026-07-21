@@ -31,7 +31,7 @@ export async function runRefreshPipeline(profile: UserProfile = defaultProfile, 
   }
   const usedLlm = groqConfigured() && Object.keys(relevanceScores).length > 0;
   const events = scoreOpportunities(ingestion.events, profile, relevanceScores, relevanceReasons).map((event) => ({ ...event, relevanceMethod: usedLlm ? "llm" as const : "fallback" as const }));
-  ledger.push({ id: "scoring", kind: "score", status: "complete", title: "Score engine completed", detail: `${events.length} events ranked. Relevance ${usedLlm ? `was reasoned by ${groqModel} for the strongest 48 candidates` : "used a transparent keyword fallback"}; distance, format, timing, weights, and explanations were computed in code.`, at: "just now" });
+  ledger.push({ id: "scoring", kind: "score", status: "complete", title: "Score engine completed", detail: `${events.length} nearby events ranked. Relevance ${usedLlm ? `was reasoned by ${groqModel} for the strongest 48 candidates` : "used a transparent keyword fallback"}; the final order uses relevance (70%) and verified proximity (30%).`, at: "just now" });
   if (userId) { const saved = await persistRefresh(userId, profile, events, ledger, ingestion.sources, ingestion.discovery); if (!saved.persisted) ledger.push({ id: "persist-warning", kind: "system", status: "attention", title: "Database sync needs attention", detail: saved.error ?? "Refresh completed but could not be persisted.", at: "just now" }); }
   return { mode: "live", events, sources: ingestion.sources, ledger };
 }

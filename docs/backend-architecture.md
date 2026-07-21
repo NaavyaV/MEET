@@ -12,7 +12,7 @@ MEET is a Next.js application with server-side ingestion routes and Supabase as 
 
 ## Discovery and quality controls
 
-- RSS/ICS: up to six configured public feeds. Only explicit future event dates inside the next 62 days become cards.
+- RSS/ICS: up to six configured public feeds. Only explicit future event dates inside the next 62 days become cards. Physical cards also need coordinates that place them inside the member's travel area.
 - Curated seeds: up to three URLs supplied by the operator. MEET checks `robots.txt`, uses a named user agent, observes a timeout, and extracts only evidence-backed events.
 - Open web: Exa produces candidate pages, not events. MEET normalizes URLs, blocks login/private/checkout sources and configured domains, checks `robots.txt`, applies per-domain and total-page budgets, then prefers JSON-LD, ICS, RSS/Atom, and Open Graph event data. For open-web discovery, Groq is the fallback for a maximum of two compact unstructured pages per refresh.
 - Evidence gate: a card needs a title, valid future date, source URL, and short source evidence. The raw page body is never persisted.
@@ -21,17 +21,14 @@ The Groq extractor receives no more than 9,000 cleaned characters and has a 550-
 
 ## Ranking
 
-Every valid event remains visible. MEET does not eliminate a card simply because it is farther than the member's normal radius or is a weaker fit.
+MEET uses the travel area as a hard boundary. An in-person or hybrid card must have verified coordinates inside the member's selected radius; unknown-distance and out-of-area physical events are rejected before ranking. Online cards remain available only when the member allows online events.
 
-The card rating is a 0–10 weighted blend of:
+The card rating is a 0–10 blend of:
 
-- semantic relevance to goals, skills, and interests;
-- practical distance (online events receive full distance credit);
-- preferred format;
-- schedule fit; and
-- caliber signals such as hackathon, workshop, mentor, demo day, or showcase.
+- semantic relevance to goals, skills, and interests (70%); and
+- verified proximity within the travel area (30%; online events receive full proximity credit).
 
-Groq supplies semantic relevance when configured. Everything else—the math, ordering, deduplication, and the explanation of a lower score—is deterministic code. Strong matches appear first; all other evidence-backed choices remain in **More to explore** with their actual rating and an explanation.
+Groq supplies semantic relevance when configured. Everything else—the geographic gate, math, ordering, deduplication, and the explanation of a lower score—is deterministic code. Strong matches appear first; lower-relevance nearby choices remain in **More to explore** with their actual rating and an explanation.
 
 ## Persistence and privacy
 
