@@ -33,6 +33,20 @@ MEET uses Groq’s `llama-3.1-8b-instant`, the current lowest-cost production te
 
 MEET uses Groq privately for semantic matching when it is configured, but the interface keeps the result simple: it shows the event distance and a short plain-language explanation based on the member’s stated goals, interests, and verified proximity.
 
+## How Codex was used
+
+Codex was used as the implementation and engineering collaborator for MEET. It was not shipped as part of the product and it is not involved when an end user refreshes the app; the runtime AI provider is Groq. Its work was performed during development in the local repository and in the connected Supabase project.
+
+- **Product translation and planning:** Codex read the product requirements, turned them into an implementation plan, and kept the experience focused on a local, professional event feed rather than a generic event directory.
+- **Application development:** Codex built and refined the Next.js/React interface, including onboarding, resume-driven profile fields, location autocomplete and map support, dark-mode styling, event cards, score explanations, saved-event behavior, logout, and the network interface.
+- **Backend and data model:** Codex implemented the server routes and Supabase integration for authentication, profiles, persisted refresh runs, event decisions, attendance, connections, source provenance, and database migrations. It also applied and verified the project migrations through the connected Supabase environment.
+- **Discovery pipeline:** Codex implemented the compliant opportunity pipeline: RSS/ICS ingestion, permission-safe seed crawling, Exa candidate search, `robots.txt` checks, URL/domain budgets, structured-event extraction, Groq fallback extraction, provenance capture, deterministic de-duplication, and local-distance filtering.
+- **Cost and safety controls:** Codex set Groq to the low-cost `llama-3.1-8b-instant` default, kept language-model work bounded to profile parsing, page extraction, and relevance, and implemented deterministic code for filtering and ranking. It also added daily refresh/token controls, with the project owner account exempted for demos and judging.
+- **Debugging and quality improvements:** Codex investigated issues such as a browser-extension hydration warning, resume/PDF parsing failures, empty JSON responses, Eventbrite's retired location-search endpoint, distant events leaking into a local feed, and Groq token-rate errors. Fixes were made in the relevant app or server code rather than masking the errors in the UI.
+- **Verification and delivery:** Codex ran TypeScript checks, ESLint, Vitest coverage, and production builds; reviewed database security guidance and Supabase advisors after schema changes; updated documentation and environment examples; and pushed verified changes to the project GitHub repository when requested.
+
+The developer remains responsible for product decisions, provider accounts, API-key ownership, source permissions, deployment configuration, and reviewing changes before release. Codex never exposes service-role or third-party API keys in browser code.
+
 ## Local setup
 
 ```bash
