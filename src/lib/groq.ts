@@ -17,12 +17,13 @@ function parseJson<T>(content: string | null | undefined): T | null {
   }
 }
 
-async function jsonCompletion<T>(system: string, prompt: string): Promise<T | null> {
+async function jsonCompletion<T>(system: string, prompt: string, maxCompletionTokens = 800): Promise<T | null> {
   const groq = client();
   if (!groq) return null;
   const response = await groq.chat.completions.create({
     model: MODEL,
     temperature: 0.1,
+    max_completion_tokens: maxCompletionTokens,
     response_format: { type: "json_object" },
     messages: [
       { role: "system", content: `${system}\nReturn only valid JSON. Do not invent facts.` },
@@ -161,7 +162,8 @@ export type GroqExtractedEvent = {
 export async function extractEventsWithGroq(page: { url: string; title: string; text: string }) {
   const result = await jsonCompletion<{ events: GroqExtractedEvent[] }>(
     "Extract only concrete future events from this public, permitted page. Every returned field must be explicitly supported by page text. Source URL must be the page URL. Reject anything without a title, a future date, and short supporting evidence snippets. Do not infer a date, location, organizer, URL, format, or confidence.",
-    `URL: ${page.url}\nPage title: ${page.title}\nCleaned page text:\n${page.text.slice(0, 24000)}\n\nSchema: {"events":[{"title":string,"description":string,"startsAt":string,"endsAt":string|null,"timezone":string|null,"sourceUrl":string,"registrationUrl":string|null,"organizer":string|null,"format":"online"|"in-person"|"hybrid","venue":string|null,"address":string|null,"latitude":number|null,"longitude":number|null,"category":string|null,"tags":string[],"extractionConfidence":number,"evidence":string[]}]}`,
+    `URL: ${page.url}\nPage title: ${page.title}\nCleaned page text:\n${page.text.slice(0, 9000)}\n\nSchema: {"events":[{"title":string,"description":string,"startsAt":string,"endsAt":string|null,"timezone":string|null,"sourceUrl":string,"registrationUrl":string|null,"organizer":string|null,"format":"online"|"in-person"|"hybrid","venue":string|null,"address":string|null,"latitude":number|null,"longitude":number|null,"category":string|null,"tags":string[],"extractionConfidence":number,"evidence":string[]}]}`,
+    550,
   );
   return result?.events ?? [];
 }

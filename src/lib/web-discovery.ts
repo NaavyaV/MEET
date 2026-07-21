@@ -51,9 +51,9 @@ export function getWebDiscoveryConfig(env: Partial<NodeJS.ProcessEnv> = process.
   const split = (value: string | undefined) => (value ?? "").split(",").map((item) => item.trim().toLowerCase()).filter(Boolean);
   return {
     enabled: env.WEB_DISCOVERY_ENABLED === "true",
-    maxQueries: numberSetting(env.WEB_DISCOVERY_MAX_QUERIES, 3, 6),
-    maxResults: numberSetting(env.WEB_DISCOVERY_MAX_RESULTS, 18, 30),
-    maxFetches: numberSetting(env.WEB_DISCOVERY_MAX_FETCHES, 6, 15),
+    maxQueries: numberSetting(env.WEB_DISCOVERY_MAX_QUERIES, 4, 6),
+    maxResults: numberSetting(env.WEB_DISCOVERY_MAX_RESULTS, 24, 30),
+    maxFetches: numberSetting(env.WEB_DISCOVERY_MAX_FETCHES, 8, 15),
     maxPagesPerDomain: numberSetting(env.WEB_DISCOVERY_MAX_PAGES_PER_DOMAIN, 1, 2),
     allowedRegions: split(env.WEB_DISCOVERY_ALLOWED_REGIONS),
     blockedDomains: [...new Set([...DEFAULT_BLOCKED_DOMAINS, ...split(env.WEB_DISCOVERY_BLOCKED_DOMAINS)])],
@@ -154,7 +154,7 @@ export function robotsAllows(robotsText: string, targetUrl: string, userAgent: s
   return rules[0].type === "allow";
 }
 
-async function robotsDecision(url: string, userAgent: string, cache: Map<string, RobotsDecision>) {
+export async function robotsDecision(url: string, userAgent: string, cache: Map<string, RobotsDecision>) {
   const origin = new URL(url).origin;
   const cached = cache.get(origin); if (cached) return cached;
   try {
@@ -252,7 +252,8 @@ export function validateExtractedEvent(input: ExtractedCandidate, sourceUrl: str
   const format = input.format ?? eventFormat(`${input.venue ?? ""} ${input.address ?? ""} ${input.description ?? ""}`);
   const hasProfileCoordinates = Number.isFinite(profile.latitude) && Number.isFinite(profile.longitude) && (Math.abs(profile.latitude) > 0.001 || Math.abs(profile.longitude) > 0.001);
   const distanceMiles = hasProfileCoordinates && latitude != null && longitude != null ? haversineMiles(profile.latitude, profile.longitude, latitude, longitude) : null;
-  if (format === "in-person" && distanceMiles != null && distanceMiles > profile.travelRadius) return { event: null, reason: `Rejected extraction: ${distanceMiles.toFixed(1)} mi is outside the ${profile.travelRadius}-mi radius.` };
+  // Distance affects ranking rather than eligibility. A person can still choose
+  // a worthwhile event beyond their usual travel preference.
   if (profile.formatPreference === "online" && format === "in-person") return { event: null, reason: "Rejected extraction: profile is online-only." };
   const address = input.address?.toLowerCase() ?? "";
   if (format !== "online" && address && allowedRegions.length && !allowedRegions.some((region) => address.includes(region.toLowerCase()))) return { event: null, reason: "Rejected extraction: known address is outside WEB_DISCOVERY_ALLOWED_REGIONS." };
@@ -346,7 +347,7 @@ export function toProvenanceRecord(event: Opportunity) {
 export type WebDiscoveryResult = { events: Opportunity[]; ledger: LedgerEntry[]; diagnostics: DiscoveryDiagnostics };
 
 export async function runWebDiscovery(profile: UserProfile, provider: WebSearchProvider = new ExaSearchProvider(process.env.EXA_API_KEY || ""), config = getWebDiscoveryConfig()): Promise<WebDiscoveryResult> {
-  config = { ...config, maxQueries: Math.min(config.maxQueries, 4), maxResults: Math.min(config.maxResults, 20), maxFetches: Math.min(config.maxFetches, 8), maxPagesPerDomain: 1 };
+  config = { ...config, maxQueries: Math.min(config.maxQueries, 4), maxResults: Math.min(config.maxResults, 24), maxFetches: Math.min(config.maxFetches, 8), maxPagesPerDomain: 1 };
   const diagnostics: DiscoveryDiagnostics = { enabled: config.enabled, queries: [], candidates: [], fetched: 0, structuredExtractions: 0, llmExtractions: 0, rejectedEvents: [] };
   const ledger: LedgerEntry[] = [];
   if (!config.enabled) return { events: [], diagnostics, ledger: [{ id: "web-disabled", kind: "source", status: "skipped", title: "Web discovery", detail: "Disabled by WEB_DISCOVERY_ENABLED.", at: "just now" }] };
@@ -370,13 +371,12 @@ export async function runWebDiscovery(profile: UserProfile, provider: WebSearchP
   resultSets.forEach((result, index) => { if (result.status === "fulfilled") rawResults.push(...result.value.results.map((candidate) => ({ ...candidate, query: result.value.query }))); else ledger.push({ id: `web-search-error-${index}`, kind: "source", status: "attention", title: "Web discovery search failed", detail: result.reason instanceof Error ? result.reason.message : "Search provider request failed.", at: "just now" }); });
   const { selected, candidates } = selectCandidates(rawResults, config);
   diagnostics.candidates = candidates;
-  const skipped = candidates.filter((candidate) => candidate.decision === "skipped");
-  ledger.push({ id: "web-candidates", kind: "source", status: "complete", title: "Web candidates screened", detail: `${rawResults.length} results found; ${selected.length} eligible pages selected. ${skipped.length} skipped by URL, domain, duplicate, or budget rules.`, at: "just now" });
-  for (const [index, candidate] of skipped.entries()) ledger.push({ id: `web-skip-${index}-${stableId(candidate.normalizedUrl)}`, kind: "source", status: "skipped", title: candidate.domain, detail: candidate.reason ?? "Candidate skipped.", at: "just now" });
+  ledger.push({ id: "web-candidates", kind: "source", status: "complete", title: "Web candidates screened", detail: `${rawResults.length} results screened; ${selected.length} compliant public pages selected for event extraction.`, at: "just now" });
   const robotsCache = new Map<string, RobotsDecision>(); const limiter = new DomainRateLimiter(); const events: Opportunity[] = [];
+  let groqExtractionPages = 0;
   await Promise.allSettled(selected.map(async (candidate) => {
     const robot = await robotsDecision(candidate.normalizedUrl, config.userAgent, robotsCache);
-    if (robot.decision !== "allowed") { candidate.decision = "robots-disallowed"; candidate.reason = robot.reason; ledger.push({ id: `web-robots-${stableId(candidate.normalizedUrl)}`, kind: "source", status: "skipped", title: `robots.txt · ${candidate.domain}`, detail: robot.reason, at: "just now" }); return; }
+    if (robot.decision !== "allowed") { candidate.decision = "robots-disallowed"; candidate.reason = robot.reason; return; }
     try {
       const page = await fetchPage(candidate.normalizedUrl, config.userAgent, limiter); diagnostics.fetched += 1; candidate.normalizedUrl = page.url; candidate.decision = "fetched"; candidate.reason = "Fetched after URL, budget, and robots checks.";
       const jsonLd = extractStructuredEvents(page.text, page.url, profile, config.allowedRegions);
@@ -388,22 +388,23 @@ export async function runWebDiscovery(profile: UserProfile, provider: WebSearchP
         structured.events.forEach((event) => { if (event.provenance) { event.provenance.discoveryQuery = candidate.query; event.provenance.robotsDecision = "allowed"; } });
         diagnostics.structuredExtractions += structured.events.length; events.push(...structured.events);
         ledger.push({ id: `web-structured-${stableId(page.url)}`, kind: "source", status: "complete", title: `Structured event data · ${candidate.domain}`, detail: `${structured.events.length} JSON-LD, feed, ICS, or Open Graph event extraction${structured.events.length === 1 ? "" : "s"} from ${page.url}.`, at: "just now" });
-      } else if (groqConfigured()) {
-        const extracted = await extractEventsWithGroq({ url: page.url, title: titleFromHtml(page.text), text: cleanHtml(page.text) });
-        const validated = extracted.map((item) => validateExtractedEvent({ ...item, source: item.organizer ?? undefined, sourceUrl: page.url, provenance: { extractionMethod: "llm", sourceDomain: domainOf(page.url), sourceUrl: page.url, evidence: [], robotsDecision: "allowed" } }, page.url, profile, new Date(), config.allowedRegions));
-        const usable = validated.flatMap((item) => item.event ? [item.event] : []);
-        validated.forEach((item) => { if (item.reason) diagnostics.rejectedEvents.push(item.reason); });
-        usable.forEach((event) => { if (event.provenance) { event.provenance.discoveryQuery = candidate.query; event.provenance.robotsDecision = "allowed"; } });
-        diagnostics.llmExtractions += usable.length; events.push(...usable);
-        ledger.push({ id: `web-llm-${stableId(page.url)}`, kind: "source", status: usable.length ? "complete" : "attention", title: `LLM extraction · ${candidate.domain}`, detail: usable.length ? `${usable.length} evidence-backed event${usable.length === 1 ? "" : "s"} extracted with Groq.` : "No evidence-backed events were extracted from this page.", at: "just now" });
-      } else {
-        diagnostics.rejectedEvents.push("Structured event data was absent and GROQ_API_KEY is unavailable for permitted unstructured extraction.");
-        ledger.push({ id: `web-no-llm-${stableId(page.url)}`, kind: "source", status: "skipped", title: `Unstructured page · ${candidate.domain}`, detail: "No structured Event data and GROQ_API_KEY is unavailable; page was not inferred locally.", at: "just now" });
+      } else if (groqConfigured() && groqExtractionPages < 2) {
+        groqExtractionPages += 1;
+        try {
+          const extracted = await extractEventsWithGroq({ url: page.url, title: titleFromHtml(page.text), text: cleanHtml(page.text) });
+          const validated = extracted.map((item) => validateExtractedEvent({ ...item, source: item.organizer ?? undefined, sourceUrl: page.url, provenance: { extractionMethod: "llm", sourceDomain: domainOf(page.url), sourceUrl: page.url, evidence: [], robotsDecision: "allowed" } }, page.url, profile, new Date(), config.allowedRegions));
+          const usable = validated.flatMap((item) => item.event ? [item.event] : []);
+          validated.forEach((item) => { if (item.reason) diagnostics.rejectedEvents.push(item.reason); });
+          usable.forEach((event) => { if (event.provenance) { event.provenance.discoveryQuery = candidate.query; event.provenance.robotsDecision = "allowed"; } });
+          diagnostics.llmExtractions += usable.length; events.push(...usable);
+          if (usable.length) ledger.push({ id: `web-llm-${stableId(page.url)}`, kind: "source", status: "complete", title: `LLM extraction · ${candidate.domain}`, detail: `${usable.length} evidence-backed event${usable.length === 1 ? "" : "s"} extracted with Groq.`, at: "just now" });
+        } catch (error) {
+          diagnostics.rejectedEvents.push(error instanceof Error ? `Groq extraction skipped: ${error.message}` : "Groq extraction skipped.");
+        }
       }
       diagnostics.rejectedEvents.push(...structured.rejected);
-    } catch (error) { candidate.decision = "error"; candidate.reason = error instanceof Error ? error.message : "Fetch failed."; ledger.push({ id: `web-fetch-error-${stableId(candidate.normalizedUrl)}`, kind: "source", status: "attention", title: `Fetch failed · ${candidate.domain}`, detail: candidate.reason, at: "just now" }); }
+    } catch (error) { candidate.decision = "error"; candidate.reason = error instanceof Error ? error.message : "Fetch failed."; }
   }));
-  for (const [index, reason] of diagnostics.rejectedEvents.entries()) ledger.push({ id: `web-rejected-${index}-${stableId(reason)}`, kind: "source", status: "skipped", title: "Extracted event rejected", detail: reason, at: "just now" });
-  ledger.unshift({ id: "web-discovery", kind: "source", status: "complete", title: "Web discovery", detail: `${diagnostics.fetched} public pages fetched within ${config.maxFetches}-page / ${config.maxPagesPerDomain}-per-domain budgets; ${events.length} evidence-backed events passed validation.`, at: "just now" });
+  ledger.unshift({ id: "web-discovery", kind: "source", status: "complete", title: "Web discovery", detail: `${diagnostics.fetched} compliant public pages checked within the ${config.maxFetches}-page budget; ${events.length} evidence-backed events found.`, at: "just now" });
   return { events, ledger, diagnostics };
 }

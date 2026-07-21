@@ -10,9 +10,9 @@ MEET is a transparent opportunity-intelligence product for events, hackathons, w
 - Resume and LinkedIn-export ingestion. Text, CSV, JSON, and text-based PDF uploads are parsed once into editable skills, interests, stage, and goals.
 - Three parallel live ingestion strategies: up to six RSS/ICS calendars, up to three permission-safe curated HTML seed pages, and compliant Exa-backed open-web discovery. Eventbrite's retired public location-search endpoint is deliberately skipped instead of producing a 404.
 - Every web-discovered event retains its discovery query, original public source URL/domain, extraction method, confidence, and short page evidence. The event detail view exposes this provenance.
-- Deterministic deduplication, ranking math, filters, score explanations, feedback actions, and portfolio insights.
+- Deterministic deduplication, ranking math, filters, score explanations, reversible saved-event actions, and portfolio insights.
 - Groq-powered profile extraction, permitted-page event extraction, and semantic relevance only.
-- Supabase email/password authentication, persisted profiles, event decisions and attendance, a complete Postgres schema, and Row Level Security policies.
+- Supabase email/password authentication, persisted profiles, event decisions and attendance, functional connection requests/acceptance/removal, a complete Postgres schema, and Row Level Security policies.
 - Resend digest endpoint, with a “send test digest” control.
 - A clearly labeled sample mode, so the product is immediately explorable before any live source is connected. It never presents samples as live source data or mixes them into a configured refresh.
 
@@ -84,7 +84,15 @@ Set whichever sources are available to you:
   MEET_RSS_FEED_URL=https://www.tddallas.org/Events/RSS,https://calendar.utdallas.edu/calendar.ics?event_types%5B%5D=30645184548410,https://calendar.utdallas.edu/calendar.ics?event_types%5B%5D=31183765024118,https://calendar.utdallas.edu/calendar.ics?event_types%5B%5D=31183766846447,https://calendar.unt.edu/calendar.ics?event_types%5B%5D=38308632250293
   ```
 
-- `CRAWL_SEED_URLS` as a comma-separated list of no more than three explicitly permission-safe public event pages
+  For a nationwide/online baseline, use:
+
+  ```bash
+  MEET_RSS_FEED_URL=https://us-rse.org/feeds/events.xml,https://www.nsf.gov/rss/rss_www_events.xml,https://mynext.events/events.rss
+  ```
+
+  US-RSE publishes a dedicated event feed, NSF publishes an events RSS feed, and MyNext.Events exposes both RSS and iCal for technology, startup, and Internet-industry events. [US-RSE feeds](https://us-rse.org/docs/feeds/), [NSF RSS](https://www.nsf.gov/rss), and [MyNext.Events](https://mynext.events/) document those feeds.
+
+- `CRAWL_SEED_URLS` as a comma-separated list of no more than three explicitly permission-safe public event pages. Good nationwide starting points to ask permission for are `https://us-rse.org/events/`, `https://www.joineta.org/events`, and `https://events.mlh.io/`. MEET independently checks `robots.txt`; permission from the owner is still required.
 - `EXA_API_KEY` plus `WEB_DISCOVERY_ENABLED=true` to enable open-web candidate discovery
 
 The feed parser keeps only events in the next 62 days. Leave `WEB_DISCOVERY_ALLOWED_REGIONS` and `WEB_DISCOVERY_BLOCKED_DOMAINS` blank unless you need stricter rules; blank values add no extra restrictions beyond MEET's safe built-in exclusions.
@@ -100,9 +108,9 @@ Web discovery fills gaps after structured calendars; it does not replace RSS/ICS
 3. MEET normalizes URLs; removes tracking IDs and duplicates; blocks login-dependent social sites, checkout, private-profile, generic-search, Eventbrite, and known event aggregators; then enforces the configured cap (at most eight pages total and one page per domain).
 4. Before every fetch it checks `robots.txt`. A denied or unavailable robots rule is a skip, never a bypass. Fetches are server-side, rate-limited per domain, time-bounded, and retried with small backoff.
 5. MEET prefers JSON-LD Event, RSS/Atom, ICS, and Open Graph-style public metadata. Only when structured Event data is absent does it pass cleaned public page text to Groq.
-6. An extraction is rejected unless it has a title, a date in the next 62 days, a valid original source URL, and page evidence. It is also pre-filtered for format preference, known distance/radius, clear irrelevance, and deduplication before batched semantic relevance scoring.
+6. An extraction is rejected unless it has a title, a date in the next 62 days, a valid original source URL, and page evidence. Clear irrelevance and duplicates are removed; distance and format affect the rank instead of hiding an otherwise valid event.
 
-The event detail provenance panel distinguishes **Web-discovered**, **Structured source**, **LLM-reasoned**, and **Computed**. The Trust Ledger lists query generation, candidate screening, robots skips, fetch failures, extraction method, rejected extraction reason, and merges.
+The event detail provenance panel distinguishes **Web-discovered**, **Structured source**, **LLM-reasoned**, and **Computed**. The Trust Ledger intentionally shows completed discovery, extraction, deduplication, and ranking work; operational skips and failures stay out of the member-facing view.
 
 #### Crawling boundaries
 
@@ -110,6 +118,10 @@ The event detail provenance panel distinguishes **Web-discovered**, **Structured
 - It never fetches login-required social media, ticket checkout, personal-profile, or private-data pages.
 - It stores public event metadata and provenance only—never entire fetched pages indefinitely.
 - Add a comma-separated domain to `WEB_DISCOVERY_BLOCKED_DOMAINS` to block it immediately. Tune `WEB_DISCOVERY_MAX_*` values to reduce cost and crawl footprint further.
+
+## Backend walkthrough
+
+For a concise, shareable explanation of the request flow, data model, safety controls, and deployment responsibilities, see [the backend architecture walkthrough](docs/backend-architecture.md).
 
 ### 5. Resend
 

@@ -64,6 +64,12 @@ describe("web discovery decisions", () => {
     expect(result.reason).toContain("more than 62 days away");
   });
 
+  it("keeps a valid event beyond the usual travel radius so ranking can explain the tradeoff", () => {
+    const profile = { ...defaultProfile, travelRadius: 5, latitude: 41.8781, longitude: -87.6298 };
+    const result = validateExtractedEvent({ title: "Regional AI workshop", startsAt: future, sourceUrl: "https://example.edu/events/regional-ai", format: "in-person", latitude: 42.3314, longitude: -83.0458, category: "Workshop", tags: ["AI"], extractionConfidence: 0.9, evidence: ["Regional AI workshop on the event page"], provenance: { extractionMethod: "structured" } }, "https://example.edu/events/regional-ai", profile);
+    expect(result.event?.distanceMiles).toBeGreaterThan(profile.travelRadius);
+  });
+
   it("projects source provenance without raw page text", () => {
     const record = toProvenanceRecord(webEvent());
     expect(record).toMatchObject({ source_domain: "example.edu", extraction_method: "structured", discovery_query: "AI events Chicago" });

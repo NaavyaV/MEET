@@ -76,3 +76,27 @@ export async function PUT(request: NextRequest) {
     return noStore(NextResponse.json({ error: error instanceof Error ? error.message : "Could not save this decision." }, { status: 500 }));
   }
 }
+
+export async function DELETE(request: NextRequest) {
+  try {
+    const account = await currentUser(request);
+    if (account.response || !account.admin || !account.user) return account.response!;
+
+    const body = await request.json().catch(() => null) as PreferenceRequest | null;
+    const event = body?.event;
+    if (!event?.id || !event.url) return noStore(NextResponse.json({ error: "A valid event is required." }, { status: 400 }));
+
+    const canonicalUrl = `${event.url}#meet-${event.id}`;
+    const { data: stored, error: eventError } = await account.admin.from("events").select("id").eq("canonical_url", canonicalUrl).maybeSingle();
+    if (eventError) throw new Error(eventError.message);
+    if (!stored) return noStore(NextResponse.json({ persisted: false }));
+
+    const { error: preferenceError } = await account.admin.from("event_preferences").delete().eq("user_id", account.user.id).eq("event_id", stored.id);
+    if (preferenceError) throw new Error(preferenceError.message);
+    const { error: attendanceError } = await account.admin.from("event_attendance").delete().eq("user_id", account.user.id).eq("event_id", stored.id);
+    if (attendanceError) throw new Error(attendanceError.message);
+    return noStore(NextResponse.json({ persisted: true }));
+  } catch (error) {
+    return noStore(NextResponse.json({ error: error instanceof Error ? error.message : "Could not remove this event decision." }, { status: 500 }));
+  }
+}

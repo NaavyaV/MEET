@@ -1,7 +1,7 @@
 import { deduplicate } from "./engine";
 import { isWithinUpcomingEventWindow } from "./event-window";
 import { extractEventsWithGroq, groqConfigured } from "./groq";
-import { haversineMiles, validateExtractedEvent, getWebDiscoveryConfig, runWebDiscovery, WebDiscoveryResult } from "./web-discovery";
+import { haversineMiles, validateExtractedEvent, getWebDiscoveryConfig, robotsDecision, runWebDiscovery, WebDiscoveryResult } from "./web-discovery";
 import { LedgerEntry, Opportunity, UserProfile } from "./types";
 
 type SourceStatus = { name: string; count: number; status: "complete" | "skipped" | "attention" };
@@ -18,6 +18,10 @@ function inferFormat(value: string): Opportunity["format"] { return /hybrid/i.te
 function parseIcsDate(value: string) { const match = value.match(/^(\d{4})(\d{2})(\d{2})(?:T(\d{2})(\d{2})(\d{2})?(Z)?)?$/); if (!match) return null; const [, year, month, day, hour = "00", minute = "00", second = "00", utc] = match; const iso = `${year}-${month}-${day}T${hour}:${minute}:${second}${utc ? "Z" : ""}`; const date = new Date(iso); return Number.isNaN(date.getTime()) ? null : date; }
 function icsField(block: string, field: string) { return block.match(new RegExp(`^${field}(?:;[^:]*)?:(.+)$`, "im"))?.[1].replace(/\\n/g, " ").trim() ?? ""; }
 function finiteCoordinate(value: string) { const coordinate = Number(value); return Number.isFinite(coordinate) ? coordinate : null; }
+function eventDateInText(value: string) {
+  const match = value.match(/\b20\d{2}-\d{2}-\d{2}(?:[T\s][0-2]\d:[0-5]\d(?::[0-5]\d)?(?:Z|[+-]\d{2}:?\d{2})?)?\b|\b(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\.?\s+\d{1,2}(?:,?\s+20\d{2})?\b/i)?.[0];
+  return match ? new Date(match) : null;
+}
 function locationDistance(profile: UserProfile | undefined, latitude: number | null, longitude: number | null) { return profile && latitude != null && longitude != null ? haversineMiles(profile.latitude, profile.longitude, latitude, longitude) : null; }
 
 export function parseIcs(ics: string, sourceUrl: string, now = new Date(), profile?: UserProfile): Opportunity[] {
@@ -26,7 +30,6 @@ export function parseIcs(ics: string, sourceUrl: string, now = new Date(), profi
     const title = icsField(block, "SUMMARY"); const start = parseIcsDate(icsField(block, "DTSTART")); const end = parseIcsDate(icsField(block, "DTEND")); const location = icsField(block, "LOCATION"); const description = icsField(block, "DESCRIPTION"); const url = icsField(block, "URL") || sourceUrl;
     const [latitudeText, longitudeText] = icsField(block, "GEO").split(/[;,]/); const latitude = finiteCoordinate(latitudeText); const longitude = finiteCoordinate(longitudeText); const format = inferFormat(`${location} ${description}`); const distanceMiles = locationDistance(profile, latitude, longitude);
     if (!title || !start || !isWithinUpcomingEventWindow(start, now)) return [];
-    if (format === "in-person" && distanceMiles != null && profile && distanceMiles > profile.travelRadius) return [];
     return [{ id: `ics-${slug(title)}-${start.getTime()}-${index}`, title, source: sourceDomain, sourceType: "rss", url, description, startsAt: start.toISOString(), endsAt: end?.toISOString(), format, venue: location || undefined, latitude, longitude, distanceMiles, category: "Calendar event", tags: [], provenance: { sourceDomain, sourceUrl, extractionMethod: "rss", extractionConfidence: 1, evidence: [`ICS VEVENT: ${title}; DTSTART ${icsField(block, "DTSTART")}`] } }];
   });
 }
@@ -35,12 +38,11 @@ export function parseRss(xml: string, sourceUrl: string, now = new Date(), profi
   const entries = xml.match(/<(?:item|entry)\b[\s\S]*?<\/(?:item|entry)>/gi) ?? [];
   return entries.flatMap((entry, index): Opportunity[] => {
     const title = textIn(entry, "title"); const description = textIn(entry, "description") || textIn(entry, "content") || textIn(entry, "summary");
-    const startsAt = textIn(entry, "event:start_time") || textIn(entry, "event:start") || textIn(entry, "startDate") || textIn(entry, "dtstart") || textIn(entry, "pubDate") || textIn(entry, "updated") || textIn(entry, "published"); const link = entry.match(/<link[^>]+href=["']([^"']+)["']/i)?.[1] || textIn(entry, "link") || sourceUrl;
-    const start = new Date(startsAt);
+    const startsAt = textIn(entry, "event:start_time") || textIn(entry, "event:start") || textIn(entry, "startDate") || textIn(entry, "dtstart"); const link = entry.match(/<link[^>]+href=["']([^"']+)["']/i)?.[1] || textIn(entry, "link") || sourceUrl;
+    const start = startsAt ? new Date(startsAt) : eventDateInText(`${title} ${description}`) ?? new Date(textIn(entry, "pubDate") || textIn(entry, "updated") || textIn(entry, "published"));
     const latitude = finiteCoordinate(textIn(entry, "geo:lat") || textIn(entry, "latitude")); const longitude = finiteCoordinate(textIn(entry, "geo:long") || textIn(entry, "longitude")); const format = inferFormat(`${title} ${description}`); const distanceMiles = locationDistance(profile, latitude, longitude);
-    if (!title || !isWithinUpcomingEventWindow(start, now)) return [];
-    if (format === "in-person" && distanceMiles != null && profile && distanceMiles > profile.travelRadius) return [];
-    return [{ id: `rss-${slug(title)}-${index}`, title, source: "Community RSS feed", sourceType: "rss", url: link, description: description || "", startsAt: start.toISOString(), format, latitude, longitude, distanceMiles, category: "Community event", tags: [], provenance: { sourceDomain: new URL(sourceUrl).hostname, sourceUrl, extractionMethod: "rss", extractionConfidence: 1, evidence: [`RSS/Atom item: ${title}; event date ${startsAt}`] } }];
+    if (!title || !start || !isWithinUpcomingEventWindow(start, now)) return [];
+    return [{ id: `rss-${slug(title)}-${index}`, title, source: "Community RSS feed", sourceType: "rss", url: link, description: description || "", startsAt: start.toISOString(), format, latitude, longitude, distanceMiles, category: "Community event", tags: [], provenance: { sourceDomain: new URL(sourceUrl).hostname, sourceUrl, extractionMethod: "rss", extractionConfidence: 1, evidence: [`RSS/Atom item: ${title}; event date ${start.toISOString()}`] } }];
   });
 }
 
@@ -53,7 +55,12 @@ async function rssSource(profile: UserProfile): Promise<SourceLoadResult> {
 
 async function crawlerSource(profile: UserProfile): Promise<SourceLoadResult> {
   const urls = (process.env.CRAWL_SEED_URLS ?? "").split(",").map((url) => url.trim()).filter(Boolean).slice(0, 3); if (!urls.length) return { events: [] }; if (!groqConfigured()) throw new Error("Curated crawler needs GROQ_API_KEY for permitted-page extraction");
-  const pages = await Promise.all(urls.map(async (url) => { const response = await fetch(url, { next: { revalidate: 0 }, signal: AbortSignal.timeout(8000) }); if (!response.ok) throw new Error(`${url} returned ${response.status}`); const html = await response.text(); return { url, title: html.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1] ?? "Event page", text: stripHtml(html) }; }));
+  const config = getWebDiscoveryConfig(); const robotsCache = new Map<string, { decision: "allowed" | "disallowed" | "unavailable"; reason: string }>();
+  const pages = (await Promise.all(urls.map(async (url) => {
+    const robot = await robotsDecision(url, config.userAgent, robotsCache);
+    if (robot.decision !== "allowed") return null;
+    const response = await fetch(url, { next: { revalidate: 0 }, headers: { "User-Agent": config.userAgent }, signal: AbortSignal.timeout(8000) }); if (!response.ok) throw new Error(`${url} returned ${response.status}`); const html = await response.text(); return { url, title: html.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1] ?? "Event page", text: stripHtml(html) };
+  }))).filter((page): page is { url: string; title: string; text: string } => Boolean(page));
   const groups = await Promise.all(pages.map(async (page) => (await extractEventsWithGroq(page)).flatMap((event) => { const validated = validateExtractedEvent({ ...event, source: event.organizer ?? "Permitted seed source", sourceUrl: page.url, provenance: { sourceDomain: new URL(page.url).hostname, sourceUrl: page.url, extractionMethod: "llm", evidence: [], robotsDecision: "allowed" } }, page.url, profile); return validated.event ? [{ ...validated.event, sourceType: "curated-crawler" as const }] : []; })));
   return { events: groups.flat() };
 }
