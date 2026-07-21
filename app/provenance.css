@@ -1,0 +1,12 @@
+.source-row { flex-wrap: wrap; }
+.source-type { color:#c2bcff; background:#302c58; border-radius:4px; padding:2px 4px; font:8px "DM Mono",monospace; }
+.provenance-panel { margin-top:24px; padding:16px; border:1px solid #353a50; background:#141724; border-radius:10px; }
+.provenance-panel h3 { margin:4px 0 0; font-size:14px; }
+.provenance-grid { display:grid; grid-template-columns:repeat(3,1fr); gap:10px; margin:13px 0; }
+.provenance-grid p { margin:0; color:#515467; font-size:11px; line-height:1.35; }
+.provenance-grid span, .evidence > span { display:block; margin-bottom:3px; color:#8588a0; font:9px "DM Mono",monospace; text-transform:uppercase; }
+.provenance-grid small, .provenance-grid a { display:flex; align-items:center; gap:3px; margin-top:4px; color:#706bd1; font-size:9px; text-decoration:none; overflow-wrap:anywhere; }
+.evidence { border-top:1px solid #e4e4f2; padding-top:10px; }
+.evidence p { margin:4px 0; color:#72758a; font-size:10px; line-height:1.42; }
+@media (max-width: 840px) { .provenance-grid { grid-template-columns:1fr 1fr; } }
+@media (max-width: 600px) { .provenance-grid { grid-template-columns:1fr; } }

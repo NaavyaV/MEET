@@ -1,0 +1,34 @@
+{
+  "name": "meet-opportunity-intelligence",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "eslint .",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@supabase/ssr": "^0.8.0",
+    "@supabase/supabase-js": "^2.57.4",
+    "groq-sdk": "^0.33.0",
+    "leaflet": "^1.9.4",
+    "next": "^16.2.11",
+    "pdf-parse": "^2.4.5",
+    "react": "^19.2.3",
+    "react-dom": "^19.2.3",
+    "react-leaflet": "^5.0.0"
+  },
+  "devDependencies": {
+    "@types/leaflet": "^1.9.21",
+    "@types/node": "^22.10.1",
+    "@types/react": "^19.0.2",
+    "@types/react-dom": "^19.0.2",
+    "eslint": "^9.17.0",
+    "eslint-config-next": "^16.2.11",
+    "typescript": "^5.7.2",
+    "vitest": "^4.1.10"
+  }
+}
